@@ -173,7 +173,6 @@ export default function OrdersPage(): JSX.Element {
       setOrders(normalized);
     } catch (err: unknown) {
       // keep console message for debugging
-      // eslint-disable-next-line no-console
       console.error('Failed to fetch orders:', err);
       setFetchError('Failed to fetch orders. See console for details.');
       setOrders([]);

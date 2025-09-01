@@ -277,7 +277,6 @@ export default function ItemsPage(): JSX.Element {
     });
     observersRef.current.clear();
     forceRerender((n) => n + 1);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSearch, selectedConcepts, selectedFabrics, selectedColors, stockFilter, pageSize]);
 
   // filtering logic

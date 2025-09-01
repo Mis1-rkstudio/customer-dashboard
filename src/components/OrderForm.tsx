@@ -156,7 +156,6 @@ export default function OrderForm({
         }
       } catch (errUnknown) {
         // runtime-safe logging
-        // eslint-disable-next-line no-console
         console.error('fetchData error', errUnknown);
         setError('Failed to load necessary data.');
       }
@@ -375,7 +374,6 @@ export default function OrderForm({
         if (typeof closeModal === 'function') closeModal();
       }
     } catch (errUnknown) {
-      // eslint-disable-next-line no-console
       console.error('submit error', errUnknown);
       setError('An unexpected error occurred.');
     } finally {

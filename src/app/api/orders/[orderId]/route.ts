@@ -56,53 +56,23 @@ function tsToISO(ts: unknown): string | null {
 }
 
 /**
- * Helper that accepts an unknown `params` (maybe a Promise), resolves it if needed,
- * and returns a plain object or null. This covers both shapes Next typings might provide.
- *
- * Avoids `any` by using a narrow Thenable shape.
- */
-type Thenable = { then: (onfulfilled?: (value: unknown) => unknown, onrejected?: (reason: unknown) => unknown) => unknown };
-
-async function resolveParams(params: unknown): Promise<Record<string, unknown> | null> {
-  if (params === null || params === undefined) return null;
-
-  // If it's a thenable / promise-like, await it
-  if (typeof params === 'object' && params !== null && 'then' in params) {
-    const maybeThenable = params as Thenable;
-    if (typeof maybeThenable.then === 'function') {
-      try {
-        const resolved = await (params as Promise<unknown>);
-        return isObject(resolved) ? (resolved as Record<string, unknown>) : null;
-      } catch {
-        return null;
-      }
-    }
-  }
-
-  return isObject(params) ? (params as Record<string, unknown>) : null;
-}
-
-/**
  * GET /api/orders/[orderId]
  *
- * Note: type of `context` uses `params?: unknown` to accept whatever Next's runtime/type definitions may pass.
- * We handle the unknown shape safely at runtime using resolveParams().
+ * Note: extract orderId from the request URL to avoid typing issues with the optional
+ * `context` param that varies between Next versions/overloads.
  */
-export async function GET(
-  request: NextRequest,
-  context: { params?: unknown } // broad & safe so it matches Next's varying types
-): Promise<NextResponse> {
-  // resolve params whether they were provided synchronously or as a Promise
-  const paramsObj = await resolveParams(context.params);
-
-  const maybeOrderId = paramsObj && typeof paramsObj['orderId'] === 'string' ? paramsObj['orderId'] : undefined;
-  const orderId = maybeOrderId?.trim();
-
-  if (!orderId) {
-    return NextResponse.json({ ok: false, message: 'Missing orderId' }, { status: 400 });
-  }
-
+export async function GET(request: NextRequest): Promise<NextResponse> {
+  // Extract the last path segment as the orderId
   try {
+    const url = new URL(request.url);
+    const segments = url.pathname.split('/').filter(Boolean);
+    const maybeOrderId = segments.length > 0 ? decodeURIComponent(segments[segments.length - 1]) : '';
+    const orderId = String(maybeOrderId ?? '').trim();
+
+    if (!orderId) {
+      return NextResponse.json({ ok: false, message: 'Missing orderId' }, { status: 400 });
+    }
+
     const docRef = db.collection('orders').doc(orderId);
     const snap = await docRef.get();
 

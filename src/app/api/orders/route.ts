@@ -35,8 +35,10 @@ function hasToDate(v: unknown): v is { toDate: () => Date } {
 
 /** Ensure we have a customer in `customers` collection.
  * Accepts unknown payload shapes and returns an id + created flag.
+ *
+ * NOTE: internal helper (not exported) so this module only exposes HTTP handlers.
  */
-export async function ensureCustomer(customerPayload: unknown): Promise<{ id: string; created: boolean }> {
+async function ensureCustomer(customerPayload: unknown): Promise<{ id: string; created: boolean }> {
   // If caller supplied an id already
   if (isObject(customerPayload) && customerPayload['id']) {
     return { id: String(customerPayload['id']), created: false };
@@ -62,8 +64,11 @@ export async function ensureCustomer(customerPayload: unknown): Promise<{ id: st
   return { id: docRef.id, created: true };
 }
 
-/** Ensure agent exists. Returns id + created flag (id may be null if no agent payload) */
-export async function ensureAgent(agentPayload: unknown): Promise<{ id: string | null; created: boolean }> {
+/** Ensure agent exists. Returns id + created flag (id may be null if no agent payload)
+ *
+ * NOTE: internal helper (not exported).
+ */
+async function ensureAgent(agentPayload: unknown): Promise<{ id: string | null; created: boolean }> {
   if (!agentPayload) return { id: null, created: false };
 
   if (isObject(agentPayload) && agentPayload['id']) {
