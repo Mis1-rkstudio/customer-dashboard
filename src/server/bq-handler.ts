@@ -69,7 +69,7 @@ export function getBQClient(): BigQuery {
   if (fileLoad === null) {
     throw new Error(
       'No credentials found. Set GOOGLE_APPLICATION_CREDENTIALS to a service-account JSON, ' +
-      'or set GCLOUD_KEY_FILE (or place key.json in project root).'
+      'or set GCLOUD_KEY_FILE (or place bigquery_key.json in project root).'
     );
   }
 
