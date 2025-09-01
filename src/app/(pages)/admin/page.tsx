@@ -39,20 +39,23 @@ export default async function AdminDashboard(params: {
 
             <div>{user.publicMetadata.role as string}</div>
 
+            {/* Make Admin */}
             <form action={setRole}>
-              <input type="hidden" value={user.id} name="id" />
-              <input type="hidden" value="admin" name="role" />
+              <input type="hidden" name="id" value={user.id} />
+              <input type="hidden" name="role" value="admin" />
               <button type="submit">Make Admin</button>
             </form>
 
+            {/* Make Moderator */}
             <form action={setRole}>
-              <input type="hidden" value={user.id} name="id" />
-              <input type="hidden" value="moderator" name="role" />
+              <input type="hidden" name="id" value={user.id} />
+              <input type="hidden" name="role" value="moderator" />
               <button type="submit">Make Moderator</button>
             </form>
 
+            {/* Remove Role */}
             <form action={removeRole}>
-              <input type="hidden" value={user.id} name="id" />
+              <input type="hidden" name="id" value={user.id} />
               <button type="submit">Remove Role</button>
             </form>
           </div>

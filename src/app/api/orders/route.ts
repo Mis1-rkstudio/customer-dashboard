@@ -1,23 +1,55 @@
-// api/orders/route.ts
 import { NextResponse } from 'next/server';
-import { currentUser, auth } from '@clerk/nextjs/server'
 import { db } from '@/lib/firebase-admin';
 import { Timestamp } from 'firebase-admin/firestore';
 
-type IncomingItem =
-  | { sku?: string; color?: string; qty?: number }
-  | { item?: any; color?: any; quantity?: number };
+type RawRecord = Record<string, unknown>;
 
-// -------------------- helper functions (unchanged) --------------------
-async function ensureCustomer(customerPayload: any) {
-  if (customerPayload?.id) {
-    return { id: String(customerPayload.id), created: false };
+// normalized incoming item row returned by normalizeItems
+type NormalizedItemRow = {
+  sku: string;
+  itemName: string;
+  color: string;
+  quantity: number;
+};
+
+type GroupedItem = { itemName: string; colors: { color: string; sets: number }[] };
+
+/** simple runtime helpers */
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+function safeString(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  return String(v).trim();
+}
+function safeNumber(v: unknown): number {
+  if (v === null || v === undefined) return 0;
+  const n = Number(v);
+  return Number.isNaN(n) ? 0 : n;
+}
+
+/** Type-guard for Firestore Timestamp-like objects */
+function hasToDate(v: unknown): v is { toDate: () => Date } {
+  return isObject(v) && typeof (v as { toDate?: unknown }).toDate === 'function';
+}
+
+/** Ensure we have a customer in `customers` collection.
+ * Accepts unknown payload shapes and returns an id + created flag.
+ */
+export async function ensureCustomer(customerPayload: unknown): Promise<{ id: string; created: boolean }> {
+  // If caller supplied an id already
+  if (isObject(customerPayload) && customerPayload['id']) {
+    return { id: String(customerPayload['id']), created: false };
   }
 
-  const name = customerPayload?.label ?? customerPayload?.value ?? customerPayload?.name ?? '';
-  const email = customerPayload?.email ?? customerPayload?.Email ?? '';
-  const phone = customerPayload?.phone ?? customerPayload?.Number ?? customerPayload?.contact ?? '';
-  const broker = customerPayload?.Broker ?? customerPayload?.broker ?? '';
+  const name = isObject(customerPayload)
+    ? safeString(customerPayload['label'] ?? customerPayload['value'] ?? customerPayload['name'])
+    : safeString(customerPayload);
+  const email = isObject(customerPayload) ? safeString(customerPayload['email'] ?? customerPayload['Email']) : '';
+  const phone = isObject(customerPayload)
+    ? safeString(customerPayload['phone'] ?? customerPayload['Number'] ?? customerPayload['contact'])
+    : '';
+  const broker = isObject(customerPayload) ? safeString(customerPayload['Broker'] ?? customerPayload['broker']) : '';
 
   const docRef = await db.collection('customers').add({
     name,
@@ -30,17 +62,20 @@ async function ensureCustomer(customerPayload: any) {
   return { id: docRef.id, created: true };
 }
 
-async function ensureAgent(agentPayload: any) {
+/** Ensure agent exists. Returns id + created flag (id may be null if no agent payload) */
+export async function ensureAgent(agentPayload: unknown): Promise<{ id: string | null; created: boolean }> {
   if (!agentPayload) return { id: null, created: false };
 
-  if (agentPayload?.id) {
-    return { id: String(agentPayload.id), created: false };
+  if (isObject(agentPayload) && agentPayload['id']) {
+    return { id: String(agentPayload['id']), created: false };
   }
 
-  const name = agentPayload?.label ?? agentPayload?.value ?? agentPayload?.name ?? '';
-  const email = agentPayload?.email ?? agentPayload?.Email ?? '';
-  const phone = agentPayload?.phone ?? agentPayload?.Contact_Number ?? '';
-  const number = agentPayload?.number ?? agentPayload?.Number ?? '';
+  const name = isObject(agentPayload)
+    ? safeString(agentPayload['label'] ?? agentPayload['value'] ?? agentPayload['name'])
+    : safeString(agentPayload);
+  const email = isObject(agentPayload) ? safeString(agentPayload['email'] ?? agentPayload['Email']) : '';
+  const phone = isObject(agentPayload) ? safeString(agentPayload['phone'] ?? agentPayload['Contact_Number']) : '';
+  const number = isObject(agentPayload) ? safeString(agentPayload['number'] ?? agentPayload['Number']) : '';
 
   const docRef = await db.collection('agents').add({
     name,
@@ -53,24 +88,53 @@ async function ensureAgent(agentPayload: any) {
   return { id: docRef.id, created: true };
 }
 
-function normalizeItems(itemsInput: IncomingItem[]) {
-  return (itemsInput || []).map((it: any) => {
-    const sku = it.sku ?? it.item?.value ?? it.itemId ?? it.item?.id ?? '';
-    const itemName =
-      it.item?.label ?? it.item?.Item ?? it.itemName ?? it.label ?? it.skuLabel ?? sku;
-    const color = (it.color?.value ?? it.color ?? '').toString();
-    const qty = it.qty ?? it.quantity ?? it.quantityFromClient ?? null;
+/** Normalize arbitrary incoming item shapes into a predictable array of rows */
+function normalizeItems(itemsInput: unknown): NormalizedItemRow[] {
+  if (!Array.isArray(itemsInput)) return [];
+
+  return (itemsInput as unknown[]).map((raw): NormalizedItemRow => {
+    if (!isObject(raw)) {
+      return { sku: '', itemName: '', color: '', quantity: 0 };
+    }
+
+    // possible property locations
+    const sku =
+      safeString(raw['sku']) ||
+      safeString(isObject(raw['item']) ? (raw['item']['value'] ?? raw['item']['id']) : '') ||
+      safeString(raw['itemId']) ||
+      '';
+
+    const itemNameCandidate =
+      (isObject(raw['item']) && safeString((raw['item'] as RawRecord)['label'])) ??
+      (isObject(raw['item']) && safeString((raw['item'] as RawRecord)['Item'])) ??
+      safeString(raw['itemName']) ??
+      safeString(raw['label']) ??
+      safeString(raw['skuLabel']) ??
+      sku;
+
+    const itemName = itemNameCandidate || sku || '';
+
+    const color =
+      safeString(raw['color']) ||
+      (isObject(raw['color']) ? safeString((raw['color'] as RawRecord)['value']) : '') ||
+      '';
+
+    // qty can be at many places
+    const qtyRaw = raw['qty'] ?? raw['quantity'] ?? raw['quantityFromClient'] ?? raw['sets'] ?? raw['set'] ?? null;
+    const quantity = safeNumber(qtyRaw);
+
     return {
       sku: String(sku),
-      itemName: itemName ? String(itemName) : '',
+      itemName: String(itemName),
       color,
-      quantity: Number(qty),
+      quantity,
     };
   });
 }
 
-function groupItemsToColors(rows: { itemName: string; color: string; quantity: number }[]) {
-  const grouped: { itemName: string; colors: { color: string; sets: number }[] }[] = [];
+/** group flat rows into grouped items by itemName and color */
+function groupItemsToColors(rows: NormalizedItemRow[]): GroupedItem[] {
+  const grouped: GroupedItem[] = [];
 
   for (const r of rows) {
     const name = r.itemName || r.sku || 'unknown';
@@ -80,9 +144,8 @@ function groupItemsToColors(rows: { itemName: string; color: string; quantity: n
       grouped.push(entry);
     }
 
-    const colorName = (r.color ?? '').toString();
+    const colorName = safeString(r.color);
     const qty = Number(r.quantity) || 0;
-
     const colorEntry = entry.colors.find((c) => c.color === colorName);
     if (colorEntry) {
       colorEntry.sets += qty;
@@ -94,80 +157,96 @@ function groupItemsToColors(rows: { itemName: string; color: string; quantity: n
   return grouped;
 }
 
-// -------------------- GET handler (list orders) --------------------
-export async function GET() {
+/** GET /api/orders - list orders (keeps previous behavior) */
+export async function GET(): Promise<NextResponse> {
   try {
-    const { userId } = await auth()
-    const user = await currentUser()
-
     const snapshot = await db.collection('orders').orderBy('createdAt', 'desc').limit(500).get();
-    const orders: any[] = [];
+    const orders: unknown[] = [];
 
     snapshot.forEach((doc) => {
-      const data: any = doc.data();
+      const dataRaw = (doc.data() ?? {}) as RawRecord;
 
+      // Try to normalize createdAt to ISO string when possible.
       let createdAtIso: string | null = null;
-      if (data?.createdAt) {
+      const createdAtVal = dataRaw['createdAt'];
+      if (createdAtVal) {
         try {
-          if (typeof data.createdAt.toDate === 'function') {
-            createdAtIso = data.createdAt.toDate().toISOString();
+          // Firestore Timestamp-like
+          if (hasToDate(createdAtVal)) {
+            const d = createdAtVal.toDate();
+            if (!Number.isNaN(d.getTime())) createdAtIso = d.toISOString();
           } else {
-            createdAtIso = new Date(data.createdAt).toISOString();
+            const d = new Date(String(createdAtVal));
+            if (!Number.isNaN(d.getTime())) createdAtIso = d.toISOString();
           }
         } catch {
           createdAtIso = null;
         }
       }
 
-      const items = Array.isArray(data.items) ? data.items : [];
+      const items = Array.isArray(dataRaw['items']) ? (dataRaw['items'] as unknown[]) : [];
 
+      // compute total qty only for grouped shape with colors
       let totalQty = 0;
       for (const it of items) {
-        if (Array.isArray(it.colors)) {
-          for (const c of it.colors) {
-            totalQty += Number(c.sets ?? 0);
+        if (isObject(it) && Array.isArray(it['colors'])) {
+          for (const c of it['colors'] as unknown[]) {
+            if (isObject(c)) totalQty += safeNumber(c['sets']);
           }
+        } else if (isObject(it)) {
+          // fallback for flat rows
+          totalQty += safeNumber(it['quantity'] ?? it['qty'] ?? it['sets']);
         }
       }
 
       orders.push({
-        // userData: user,
         id: doc.id,
-        customerName: data.customerName ?? '',
-        customerEmail: data.customerEmail ?? '',
-        customerPhone: data.customerPhone ?? '',
-        agentName: data.agentName ?? '',
-        agentPhone: data.agentPhone ?? '',
+        customerName: safeString(dataRaw['customerName'] ?? dataRaw['customer'] ?? ''),
+        customerEmail: safeString(
+          dataRaw['customerEmail'] ??
+          (isObject(dataRaw['customer']) ? (dataRaw['customer'] as RawRecord)['email'] : undefined)
+        ),
+        customerPhone: safeString(
+          dataRaw['customerPhone'] ??
+          (isObject(dataRaw['customer']) ? (dataRaw['customer'] as RawRecord)['phone'] : undefined)
+        ),
+        agentName: safeString(dataRaw['agentName'] ?? dataRaw['agent'] ?? ''),
+        agentPhone: safeString(
+          dataRaw['agentPhone'] ??
+          (isObject(dataRaw['agent']) ? (dataRaw['agent'] as RawRecord)['phone'] : undefined)
+        ),
         items,
         createdAt: createdAtIso,
         totalQty,
-        source: data.source ?? null,
+        source: safeString(dataRaw['source'] ?? null),
       });
     });
 
-    // keep existing behavior (return array) — if other callers expect array, keep this
     return NextResponse.json(orders);
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('Failed to read orders:', err);
-    // return JSON error body (not plain text)
-    return NextResponse.json({ ok: false, message: err?.message ?? 'Failed to read orders' }, { status: 500 });
+    const msg = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ ok: false, message: msg }, { status: 500 });
   }
 }
 
-// -------------------- POST handler (consistent JSON responses) --------------------
-export async function POST(req: Request) {
+/** POST /api/orders - create new order */
+export async function POST(req: Request): Promise<NextResponse> {
   try {
-    const body = await req.json();
+    const body = (await req.json()) as unknown;
 
-    const customerPayload = body.customer;
-    const agentPayload = body.agent;
-    const itemsInput = body.items;
+    if (!isObject(body)) {
+      return NextResponse.json({ ok: false, message: 'Bad Request: invalid JSON body' }, { status: 400 });
+    }
 
-    // Basic validation -> return JSON errors
+    const customerPayload = body['customer'];
+    const agentPayload = body['agent'];
+    const itemsInput = body['items'];
+
     if (!customerPayload) {
       return NextResponse.json({ ok: false, message: 'Bad Request: Missing customer' }, { status: 400 });
     }
-    if (!itemsInput || !Array.isArray(itemsInput) || itemsInput.length === 0) {
+    if (!itemsInput || !Array.isArray(itemsInput) || (itemsInput as unknown[]).length === 0) {
       return NextResponse.json({ ok: false, message: 'Bad Request: Missing items' }, { status: 400 });
     }
 
@@ -175,19 +254,19 @@ export async function POST(req: Request) {
     const agentResult = await ensureAgent(agentPayload);
 
     const normalized = normalizeItems(itemsInput);
-    const invalidItem = normalized.find((it) => !it.sku && !it.itemName);
+    const invalidItem = normalized.find((it) => (!it.sku && !it.itemName));
     if (invalidItem) {
       return NextResponse.json({ ok: false, message: 'Bad Request: One or more items missing sku/name' }, { status: 400 });
     }
 
     const groupedItems = groupItemsToColors(normalized);
 
-    const orderDoc: any = {
-      customerName: customerPayload?.label ?? customerPayload?.value ?? customerPayload?.name ?? '',
-      customerEmail: customerPayload?.email ?? customerPayload?.Email ?? '',
-      customerPhone: customerPayload?.phone ?? customerPayload?.Number ?? customerPayload?.contact ?? '',
-      agentName: agentPayload ? (agentPayload?.label ?? agentPayload?.value ?? agentPayload?.name ?? '') : '',
-      agentPhone: agentPayload ? (agentPayload?.phone ?? agentPayload?.Contact_Number ?? agentPayload?.number ?? '') : '',
+    const orderDoc: RawRecord = {
+      customerName: safeString((isObject(customerPayload) && (customerPayload['label'] ?? customerPayload['name'])) ?? customerPayload),
+      customerEmail: isObject(customerPayload) ? safeString(customerPayload['email'] ?? customerPayload['Email']) : '',
+      customerPhone: isObject(customerPayload) ? safeString(customerPayload['phone'] ?? customerPayload['Number'] ?? customerPayload['contact']) : '',
+      agentName: agentPayload ? safeString((isObject(agentPayload) && (agentPayload['label'] ?? agentPayload['name'])) ?? agentPayload) : '',
+      agentPhone: agentPayload ? safeString((isObject(agentPayload) && (agentPayload['phone'] ?? agentPayload['Contact_Number'] ?? agentPayload['number'])) ?? '') : '',
       items: groupedItems,
       createdAt: Timestamp.now(),
       source: 'web',
@@ -201,13 +280,13 @@ export async function POST(req: Request) {
         {
           lastOrderAt: Timestamp.now(),
           lastOrderId: newOrderRef.id,
-          phone: customerPayload?.phone ?? customerPayload?.Number ?? null,
+          phone: isObject(customerPayload) ? (customerPayload['phone'] ?? customerPayload['Number'] ?? null) : null,
           agentId: agentResult.id ?? null,
         },
         { merge: true }
       );
-    } catch (err) {
-      console.warn('Failed to update customer metadata:', err);
+    } catch (metaErr) {
+      console.warn('Failed to update customer metadata:', metaErr);
     }
 
     if (agentResult.id) {
@@ -218,12 +297,11 @@ export async function POST(req: Request) {
           },
           { merge: true }
         );
-      } catch (err) {
-        console.warn('Failed to update agent metadata:', err);
+      } catch (metaErr) {
+        console.warn('Failed to update agent metadata:', metaErr);
       }
     }
 
-    // **Return a consistent success JSON with ok:true**
     return NextResponse.json(
       {
         ok: true,
@@ -234,8 +312,9 @@ export async function POST(req: Request) {
       },
       { status: 201 }
     );
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('Error creating order:', error);
-    return NextResponse.json({ ok: false, message: `Internal Server Error: ${error?.message ?? 'unknown'}` }, { status: 500 });
+    const msg = error instanceof Error ? error.message : String(error);
+    return NextResponse.json({ ok: false, message: `Internal Server Error: ${msg}` }, { status: 500 });
   }
 }

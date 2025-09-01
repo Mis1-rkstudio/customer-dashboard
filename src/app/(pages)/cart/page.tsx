@@ -1,67 +1,156 @@
-// src/app/cart/page.tsx
 'use client';
 
-import React, { useState } from 'react';
+import React, { JSX, useState } from 'react';
 import Image from 'next/image';
 import { Trash2, Plus, Minus } from 'lucide-react';
-import { useCart } from '@/context/CartContext';
+import { useCart, CartItem } from '@/context/CartContext';
 import { useRouter } from 'next/navigation';
 import { useUser } from '@clerk/nextjs';
 import { ShareOrderButton, OrderShape } from '@/components/ShareOrder';
 
+type OrderItemPayload = {
+  itemName?: string;
+  sku?: string;
+  label?: string;
+  qty?: number;
+  quantity?: number;
+  color?: string;
+  sets?: number;
+  raw?: unknown;
+};
 
-function getGoogleDriveImageSrc(googleDriveUrl?: string | null) {
-  if (!googleDriveImage(googleDriveUrl)) return '/placeholder.svg';
-  const m = googleDriveUrl!.match(/\/d\/([^\/]+)/);
-  if (m?.[1]) return `https://drive.google.com/thumbnail?id=${m[1]}`;
-  return googleDriveUrl!;
+type CustomerPayload = {
+  label?: string;
+  name?: string;
+  email?: string | null;
+  phone?: string | null;
+};
+
+type UpdatePayload = Partial<{
+  set: number;
+  quantity: number;
+  selectedColors: string[];
+  selectedColor: string;
+}>;
+
+type CartContextType = {
+  cartItems: CartItem[];
+  removeFromCart: (id: string) => void;
+  updateItem: (id: string, payload: UpdatePayload) => void;
+  getTotalSets?: () => number;
+  clearCart?: () => void;
+};
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
 }
-function googleDriveImage(u?: string | null) {
+
+function safeNumber(v: unknown): number {
+  if (v === null || v === undefined) return 0;
+  const n = Number(v);
+  return Number.isNaN(n) ? 0 : n;
+}
+
+function googleDriveImage(u?: string | null): boolean {
   return typeof u === 'string' && u.length > 0;
 }
 
-export default function CartPage() {
-  const { cartItems, removeFromCart, updateItem, getTotalSets, clearCart } = useCart() as any;
+function getGoogleDriveImageSrc(googleDriveUrl?: string | null): string {
+  if (!googleDriveImage(googleDriveUrl)) return '/placeholder.svg';
+  const m = (googleDriveUrl ?? '').match(/\/d\/([^\/]+)/);
+  if (m?.[1]) return `https://drive.google.com/thumbnail?id=${m[1]}`;
+  return String(googleDriveUrl);
+}
+
+/** Safely extract available colors from different legacy shapes */
+function getAvailableColors(item: CartItem): string[] {
+  if (Array.isArray(item.colors) && item.colors.length > 0) {
+    return item.colors.map((c) => String(c ?? '').trim()).filter(Boolean);
+  }
+  // try raw shape if present
+  if (isObject(item.raw)) {
+    const raw = item.raw as Record<string, unknown>;
+    const ac = raw['available_colors'] ?? raw['availableColors'] ?? raw['colors'];
+    if (Array.isArray(ac)) return ac.map((c) => String(c ?? '').trim()).filter(Boolean);
+  }
+  return [];
+}
+
+/** Safely return selected colors (supports legacy single selectedColor) */
+function getSelectedColors(item: CartItem): string[] {
+  if (Array.isArray(item.selectedColors)) return item.selectedColors.map(String);
+  if (isObject(item.raw)) {
+    const val = (item.raw as Record<string, unknown>)['selectedColor'] ?? (item.raw as Record<string, unknown>)['selected_colors'];
+    if (typeof val === 'string' && val.trim()) return [val.trim()];
+    if (Array.isArray(val)) return val.map((c) => String(c ?? '').trim()).filter(Boolean);
+  }
+  return [];
+}
+
+/** safe helper to derive a human-friendly label from item, checking common legacy keys */
+function getItemLabel(item: CartItem): string {
+  if (item.name && String(item.name).trim()) return String(item.name).trim();
+  if (isObject(item.raw)) {
+    const raw = item.raw as Record<string, unknown>;
+    const candidates = [
+      raw['label'],
+      raw['skuLabel'],
+      raw['Item'],
+      raw['itemName'],
+      raw['name'],
+      raw['value'],
+    ];
+    for (const c of candidates) {
+      if (typeof c === 'string' && c.trim()) return c.trim();
+    }
+  }
+  return '';
+}
+
+export default function CartPage(): JSX.Element {
+  const { cartItems, removeFromCart, updateItem, getTotalSets, clearCart } = useCart() as CartContextType;
   const { isLoaded, isSignedIn, user } = useUser();
   const router = useRouter();
 
   // Master sets input - default 0
   const [masterQty, setMasterQty] = useState<number>(0);
-  const [applying, setApplying] = useState(false);
+  const [applying, setApplying] = useState<boolean>(false);
 
   // New: select all colours toggle
   const [selectAllColors, setSelectAllColors] = useState<boolean>(false);
 
   // placing state
-  const [placing, setPlacing] = useState(false);
+  const [placing, setPlacing] = useState<boolean>(false);
 
   // Share modal state shown after successful order
-  const [showShareModal, setShowShareModal] = useState(false);
+  const [showShareModal, setShowShareModal] = useState<boolean>(false);
   const [placedOrderForShare, setPlacedOrderForShare] = useState<OrderShape | null>(null);
 
   // helpers
-  const itemCount = cartItems.length;
-  const totalSets =
+  const itemCount: number = Array.isArray(cartItems) ? cartItems.length : 0;
+  const totalSets: number =
     typeof getTotalSets === 'function'
       ? getTotalSets()
-      : cartItems.reduce((s: number, it: any) => s + (Number(it.set ?? it.quantity ?? 0) || 0), 0);
+      : Array.isArray(cartItems)
+      ? cartItems.reduce((s: number, it: CartItem) => s + safeNumber(it.set ?? it.quantity ?? 0), 0)
+      : 0;
 
-  const inc = (it: any) => {
-    const cur = Number(it.set ?? it.quantity ?? 0) || 0;
+  const inc = (it: CartItem): void => {
+    const cur = safeNumber(it.set ?? it.quantity ?? 0);
     updateItem(it.id, { set: cur + 1 });
   };
-  const dec = (it: any) => {
-    const cur = Number(it.set ?? it.quantity ?? 0) || 0;
+  const dec = (it: CartItem): void => {
+    const cur = safeNumber(it.set ?? it.quantity ?? 0);
     updateItem(it.id, { set: Math.max(0, cur - 1) });
   };
-  const onSetChange = (it: any, v: number | string) => {
+  const onSetChange = (it: CartItem, v: number | string): void => {
     const n = Math.max(0, Number(v) || 0);
     updateItem(it.id, { set: n });
   };
 
   // toggle a single color pill for an item (multi-select)
-  const onColorToggle = (it: any, color: string) => {
-    const prev = Array.isArray(it.selectedColors) ? [...it.selectedColors] : [];
+  const onColorToggle = (it: CartItem, color: string): void => {
+    const prev = Array.isArray(it.selectedColors) ? [...it.selectedColors] : getSelectedColors(it);
     const idx = prev.findIndex((c) => String(c).toLowerCase() === String(color).toLowerCase());
     if (idx >= 0) {
       prev.splice(idx, 1);
@@ -72,7 +161,7 @@ export default function CartPage() {
   };
 
   // Apply master qty to all items
-  const applyMasterToAll = async () => {
+  const applyMasterToAll = async (): Promise<void> => {
     const n = Number(masterQty);
     if (Number.isNaN(n) || n < 0) return;
     setApplying(true);
@@ -86,16 +175,14 @@ export default function CartPage() {
   };
 
   // When toggling selectAllColors: immediately apply to all items
-  const toggleSelectAllColors = (value: boolean) => {
+  const toggleSelectAllColors = (value: boolean): void => {
     setSelectAllColors(value);
+
     for (const it of cartItems) {
-      const colours = Array.isArray(it.available_colors) && it.available_colors.length > 0
-        ? it.available_colors
-        : Array.isArray(it.colors) && it.colors.length > 0
-          ? it.colors
-          : [];
+      const colours = getAvailableColors(it);
+
       if (value) {
-        const dedup = Array.from(new Set(colours.map((c: any) => String(c).trim()).filter(Boolean)));
+        const dedup = Array.from(new Set(colours.map((c) => String(c ?? '').trim()).filter(Boolean)));
         updateItem(it.id, { selectedColors: dedup });
       } else {
         updateItem(it.id, { selectedColors: [] });
@@ -104,12 +191,11 @@ export default function CartPage() {
   };
 
   // helper to build OrderShape for the share component from the payload & items
-  function buildOrderShapeFromResponse(orderId: string | undefined, customerPayload: any, itemsPayload: any[]) {
-    const itemsForShare = (itemsPayload || []).map((r: any) => {
-      // r may have itemName, sku, qty, color
+  function buildOrderShapeFromResponse(orderId: string | undefined, customerPayload: CustomerPayload, itemsPayload: OrderItemPayload[]): OrderShape {
+    const itemsForShare = (itemsPayload || []).map((r) => {
       return {
         itemName: r.itemName ?? r.sku ?? r.label ?? String(r.itemName ?? ''),
-        color: String(r.color ?? ''), // empty string ok
+        color: String(r.color ?? ''),
         quantity: Number(r.qty ?? r.quantity ?? r.sets ?? 0) || 0,
       };
     });
@@ -118,8 +204,8 @@ export default function CartPage() {
       id: orderId,
       customer: {
         name: customerPayload?.label ?? customerPayload?.name ?? '',
-        phone: customerPayload?.phone ?? '',
-        email: customerPayload?.email ?? '',
+        phone: (customerPayload?.phone ?? '') as string,
+        email: (customerPayload?.email ?? '') as string,
       },
       agent: { name: '', number: '', email: '' },
       items: itemsForShare,
@@ -131,7 +217,7 @@ export default function CartPage() {
   }
 
   // Place Order -> POST to your server API (do NOT use firebase-admin on client)
-  const placeOrder = async () => {
+  const placeOrder = async (): Promise<void> => {
     // wait for Clerk user load
     if (!isLoaded) return;
 
@@ -140,7 +226,7 @@ export default function CartPage() {
       return;
     }
 
-    if (!cartItems || cartItems.length === 0) {
+    if (!Array.isArray(cartItems) || cartItems.length === 0) {
       alert('Cart is empty');
       return;
     }
@@ -149,20 +235,20 @@ export default function CartPage() {
 
     try {
       // send one row per selected color (if any), otherwise one row with empty color
-      const itemsPayload: any[] = [];
+      const itemsPayload: OrderItemPayload[] = [];
 
       for (const it of cartItems) {
-        const qty = Number(it.set ?? it.quantity ?? 0) || 0;
-        const selectedColors = Array.isArray(it.selectedColors)
+        const qty = safeNumber(it.set ?? it.quantity ?? 0);
+        const selectedColors: string[] = Array.isArray(it.selectedColors)
           ? it.selectedColors
-          : it.selectedColor
-            ? [it.selectedColor]
-            : [];
+          : getSelectedColors(it);
 
-        const base = {
-          sku: it.id ?? it.sku ?? it.itemId ?? String(it.name ?? ''),
+        const baseSku = it.id ?? undefined;
+        const base: OrderItemPayload = {
+          sku: baseSku,
           raw: it.raw ?? null,
-          itemName: it.name ?? it.label ?? it.skuLabel ?? undefined,
+          itemName: getItemLabel(it) || undefined,
+          qty,
         };
 
         if (selectedColors.length > 0) {
@@ -183,9 +269,17 @@ export default function CartPage() {
       }
 
       // minimal customer info derived from Clerk user (server will find/create customer)
-      const customerPayload = {
-        label: user?.fullName ?? user?.firstName ?? user?.username ?? user?.emailAddresses?.[0]?.emailAddress ?? 'Customer',
-        email: user?.emailAddresses?.[0]?.emailAddress ?? null,
+      const emailAddr = (user?.emailAddresses && user.emailAddresses[0]?.emailAddress) ?? null;
+      const userName =
+        (user?.fullName as string | undefined) ??
+        (user?.firstName as string | undefined) ??
+        (user?.username as string | undefined) ??
+        (emailAddr as string | undefined) ??
+        'Customer';
+
+      const customerPayload: CustomerPayload = {
+        label: userName,
+        email: (emailAddr as string) ?? null,
         phone: null,
       };
 
@@ -195,7 +289,7 @@ export default function CartPage() {
         items: itemsPayload,
         meta: {
           source: 'web-cart',
-          createdBy: user?.id ?? null,
+          createdBy: (user?.id as string | undefined) ?? null,
         },
       };
 
@@ -205,15 +299,31 @@ export default function CartPage() {
         body: JSON.stringify(payload),
       });
 
-      const json = await res.json().catch(() => ({ ok: false, message: 'Invalid response' }));
+      // robust parsing
+      let json: unknown = null;
+      try {
+        json = await res.json();
+      } catch {
+        json = { ok: false, message: 'Invalid response' };
+      }
 
-      if (!res.ok || !json.ok) {
-        const msg = json?.error ?? json?.message ?? 'Failed to place order';
-        throw new Error(msg);
+      const asRecord = isObject(json) ? (json as Record<string, unknown>) : {};
+      const okFlag = 'ok' in asRecord ? Boolean(asRecord['ok']) : res.ok;
+      if (!res.ok || !okFlag) {
+        const msg = (isObject(json) && (asRecord['error'] ?? asRecord['message'])) ?? 'Failed to place order';
+        throw new Error(String(msg));
       }
 
       // Build an OrderShape for sharing BEFORE clearing cart
-      const createdId = json.orderId ?? json.id ?? (json.order && json.order.id) ?? undefined;
+      let createdId: string | undefined = undefined;
+      if (isObject(json)) {
+        if (asRecord['orderId']) createdId = String(asRecord['orderId']);
+        else if (asRecord['id']) createdId = String(asRecord['id']);
+        else if (isObject(asRecord['order']) && isObject(asRecord['order'] as unknown)) {
+          createdId = String(((asRecord['order'] as Record<string, unknown>)['id']) ?? '');
+        }
+      }
+
       const shareOrder = buildOrderShapeFromResponse(createdId, customerPayload, itemsPayload);
 
       // set the placed order into state and show the share modal
@@ -226,12 +336,12 @@ export default function CartPage() {
       } else {
         for (const it of cartItems) removeFromCart(it.id);
       }
-
-      // (do not auto navigate — let user share or go to orders)
-      // router.push('/orders'); <- removed to allow sharing
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Failed to place order:', err);
-      alert('Failed to place order: ' + (err?.message ?? String(err)));
+      const message = isObject(err) && typeof (err as Record<string, unknown>)['message'] === 'string'
+        ? String((err as Record<string, unknown>)['message'])
+        : String(err);
+      alert('Failed to place order: ' + message);
     } finally {
       setPlacing(false);
     }
@@ -258,6 +368,7 @@ export default function CartPage() {
                       onClick={() => setMasterQty((v) => Math.max(0, Number(v) - 1))}
                       className="h-9 w-9 rounded-md flex items-center justify-center text-slate-200 hover:bg-[#0b2b33]"
                       aria-label="decrease master qty"
+                      type="button"
                     >
                       <Minus className="w-4 h-4" />
                     </button>
@@ -266,7 +377,7 @@ export default function CartPage() {
                       inputMode="numeric"
                       pattern="[0-9]*"
                       value={String(masterQty)}
-                      onChange={(e) => {
+                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
                         const txt = e.target.value.replace(/[^\d]/g, '');
                         setMasterQty(txt === '' ? 0 : Number(txt));
                       }}
@@ -278,6 +389,7 @@ export default function CartPage() {
                       onClick={() => setMasterQty((v) => Number(v) + 1)}
                       className="h-9 w-9 rounded-md flex items-center justify-center text-white bg-blue-600 hover:bg-blue-700"
                       aria-label="increase master qty"
+                      type="button"
                     >
                       <Plus className="w-4 h-4" />
                     </button>
@@ -288,7 +400,7 @@ export default function CartPage() {
                     <input
                       type="checkbox"
                       checked={selectAllColors}
-                      onChange={(e) => toggleSelectAllColors(e.target.checked)}
+                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => toggleSelectAllColors(e.target.checked)}
                       className="h-4 w-4 rounded border-gray-600 bg-[#07151a] text-blue-500 focus:ring-blue-400"
                       aria-label="Select all colours"
                     />
@@ -299,8 +411,9 @@ export default function CartPage() {
                 <div className="flex items-center gap-3 md:ml-auto">
                   <button
                     onClick={applyMasterToAll}
-                    disabled={applying || masterQty === null}
+                    disabled={applying}
                     className={`px-4 py-2 rounded-md font-semibold ${applying ? 'bg-blue-500/70' : 'bg-blue-600 hover:bg-blue-700'}`}
+                    type="button"
                   >
                     {applying ? 'Applying…' : 'Apply to all'}
                   </button>
@@ -317,10 +430,10 @@ export default function CartPage() {
                 Your cart is empty.
               </div>
             ) : (
-              cartItems.map((item: any) => {
-                const qty = Number(item.set ?? item.quantity ?? 0) || 0;
-                const selectedColors = Array.isArray(item.selectedColors) ? item.selectedColors : [];
-                const colors = item.available_colors ?? item.colors ?? [];
+              cartItems.map((item: CartItem) => {
+                const qty = safeNumber(item.set ?? item.quantity ?? 0);
+                const selectedColors: string[] = Array.isArray(item.selectedColors) ? item.selectedColors : getSelectedColors(item);
+                const colors: string[] = getAvailableColors(item);
 
                 return (
                   <article
@@ -332,6 +445,7 @@ export default function CartPage() {
                       aria-label={`Remove ${item.name}`}
                       className="absolute top-4 right-4 h-9 w-9 rounded-full bg-[#0f1724] border border-[#1f2937] flex items-center justify-center text-red-400 hover:bg-[#17202a] z-10"
                       title="Remove"
+                      type="button"
                     >
                       <Trash2 className="w-4 h-4" />
                     </button>
@@ -339,8 +453,8 @@ export default function CartPage() {
                     <div className="grid grid-cols-[88px_1fr_220px] gap-6 items-start p-6">
                       <div className="w-20 h-20 rounded-md overflow-hidden bg-[#0f1724] flex items-center justify-center">
                         <Image
-                          src={googleDriveImage(item.image || item.image_url) ? getGoogleDriveImageSrc(item.image || item.image_url) : '/placeholder.svg'}
-                          alt={item.name}
+                          src={googleDriveImage(item.image ?? item.image_url ?? null) ? getGoogleDriveImageSrc(item.image ?? item.image_url ?? null) : '/placeholder.svg'}
+                          alt={String(item.name ?? '')}
                           width={160}
                           height={160}
                           className="object-cover w-full h-full"
@@ -370,7 +484,7 @@ export default function CartPage() {
                             <div className="text-sm text-slate-400">No colors</div>
                           ) : (
                             colors.map((c: string) => {
-                              const isActive = selectedColors.some((sc: any) => String(sc).toLowerCase() === String(c).toLowerCase());
+                              const isActive = selectedColors.some((sc: string) => String(sc).toLowerCase() === String(c).toLowerCase());
                               return (
                                 <button
                                   key={c}
@@ -378,7 +492,8 @@ export default function CartPage() {
                                   className={`px-3 py-1 rounded-full text-sm font-medium transition ${isActive
                                     ? 'bg-blue-600 text-white shadow'
                                     : 'bg-[#0f1724] text-slate-200 border border-[#1f2937] hover:bg-[#13242f]'
-                                    }`}
+                                  }`}
+                                  type="button"
                                 >
                                   {c}
                                 </button>
@@ -394,6 +509,7 @@ export default function CartPage() {
                             onClick={() => dec(item)}
                             className="h-9 w-9 rounded-md flex items-center justify-center text-slate-200 hover:bg-[#0b2b33]"
                             aria-label="Decrease"
+                            type="button"
                           >
                             <Minus className="w-4 h-4" />
                           </button>
@@ -402,7 +518,7 @@ export default function CartPage() {
                             type="number"
                             min={0}
                             value={String(qty)}
-                            onChange={(e) => onSetChange(item, Number(e.target.value))}
+                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => onSetChange(item, Number(e.target.value))}
                             className="w-16 text-center bg-transparent text-white font-medium outline-none"
                             aria-label={`Quantity for ${item.name}`}
                           />
@@ -411,6 +527,7 @@ export default function CartPage() {
                             onClick={() => inc(item)}
                             className="h-9 w-9 rounded-md flex items-center justify-center text-white bg-blue-600 hover:bg-blue-700"
                             aria-label="Increase"
+                            type="button"
                           >
                             <Plus className="w-4 h-4" />
                           </button>
@@ -447,6 +564,7 @@ export default function CartPage() {
                   onClick={placeOrder}
                   className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-md font-semibold disabled:opacity-60 disabled:cursor-not-allowed"
                   disabled={placing}
+                  type="button"
                 >
                   {placing ? 'Placing order…' : 'Place Order'}
                 </button>
@@ -480,6 +598,7 @@ export default function CartPage() {
                 onClick={() => { setShowShareModal(false); setPlacedOrderForShare(null); }}
                 className="text-slate-400 hover:text-white ml-4"
                 aria-label="Close"
+                type="button"
               >
                 ✕
               </button>
@@ -504,6 +623,7 @@ export default function CartPage() {
                   router.push('/orders');
                 }}
                 className="ml-auto bg-transparent border border-[#23303a] text-slate-300 px-3 py-2 rounded hover:bg-[#0f1724]"
+                type="button"
               >
                 View Orders
               </button>
@@ -515,7 +635,6 @@ export default function CartPage() {
           </div>
         </div>
       )}
-
     </div>
   );
 }

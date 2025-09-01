@@ -1,47 +1,103 @@
-// app/api/orders/[orderId]/route.ts
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/firebase-admin';
 
 /**
- * GET /api/orders/:orderId
- * Returns: { ok: true, order: { id, ...data, createdAt: "<ISO string>" } }
- * Errors return JSON with ok:false and a proper HTTP status.
+ * Convert a variety of timestamp shapes to an ISO string when possible.
+ * Accepts:
+ *  - Firestore Timestamp-like { toDate(): Date }
+ *  - plain object { seconds: number, nanoseconds?: number }
+ *  - ISO string or numeric epoch
  */
+type TimestampLikeWithToDate = { toDate: () => Date };
+type SecondsObject = { seconds: number; nanoseconds?: number };
 
-function tsToISO(ts: any): string | null {
-  if (!ts) return null;
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
 
-  // Firestore Timestamp (has toDate)
-  if (typeof ts.toDate === 'function') {
+function hasToDate(v: unknown): v is TimestampLikeWithToDate {
+  return isObject(v) && typeof (v as { toDate?: unknown }).toDate === 'function';
+}
+
+function hasSeconds(v: unknown): v is SecondsObject {
+  return isObject(v) && typeof (v as { seconds?: unknown }).seconds === 'number';
+}
+
+function tsToISO(ts: unknown): string | null {
+  if (ts === null || ts === undefined) return null;
+
+  // Firestore Timestamp-like: has toDate()
+  if (hasToDate(ts)) {
     try {
-      return ts.toDate().toISOString();
+      const d = ts.toDate();
+      if (!Number.isNaN(d.getTime())) return d.toISOString();
     } catch {
-      // fallthrough
+      // fallthrough to other checks
     }
   }
 
   // Plain object with seconds/nanoseconds
-  if (typeof ts.seconds === 'number') {
+  if (hasSeconds(ts)) {
     const seconds = Number(ts.seconds);
-    const nanoseconds = Number(ts.nanoseconds || 0);
+    const nanoseconds = Number((ts as SecondsObject).nanoseconds ?? 0);
     const ms = seconds * 1000 + Math.floor(nanoseconds / 1e6);
-    return new Date(ms).toISOString();
+    const d = new Date(ms);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
+    return null;
   }
 
-  // ISO string or epoch
+  // String or number epoch/ISO
   if (typeof ts === 'string' || typeof ts === 'number') {
-    const d = new Date(ts as any);
-    if (!isNaN(d.getTime())) return d.toISOString();
+    const d = new Date(ts);
+    if (!Number.isNaN(d.getTime())) return d.toISOString();
   }
 
   return null;
 }
 
+/**
+ * Helper that accepts an unknown `params` (maybe a Promise), resolves it if needed,
+ * and returns a plain object or null. This covers both shapes Next typings might provide.
+ *
+ * Avoids `any` by using a narrow Thenable shape.
+ */
+type Thenable = { then: (onfulfilled?: (value: unknown) => unknown, onrejected?: (reason: unknown) => unknown) => unknown };
+
+async function resolveParams(params: unknown): Promise<Record<string, unknown> | null> {
+  if (params === null || params === undefined) return null;
+
+  // If it's a thenable / promise-like, await it
+  if (typeof params === 'object' && params !== null && 'then' in params) {
+    const maybeThenable = params as Thenable;
+    if (typeof maybeThenable.then === 'function') {
+      try {
+        const resolved = await (params as Promise<unknown>);
+        return isObject(resolved) ? (resolved as Record<string, unknown>) : null;
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  return isObject(params) ? (params as Record<string, unknown>) : null;
+}
+
+/**
+ * GET /api/orders/[orderId]
+ *
+ * Note: type of `context` uses `params?: unknown` to accept whatever Next's runtime/type definitions may pass.
+ * We handle the unknown shape safely at runtime using resolveParams().
+ */
 export async function GET(
-  request: Request,
-  { params }: { params: { orderId?: string } }
-) {
-  const orderId = params?.orderId;
+  request: NextRequest,
+  context: { params?: unknown } // broad & safe so it matches Next's varying types
+): Promise<NextResponse> {
+  // resolve params whether they were provided synchronously or as a Promise
+  const paramsObj = await resolveParams(context.params);
+
+  const maybeOrderId = paramsObj && typeof paramsObj['orderId'] === 'string' ? paramsObj['orderId'] : undefined;
+  const orderId = maybeOrderId?.trim();
+
   if (!orderId) {
     return NextResponse.json({ ok: false, message: 'Missing orderId' }, { status: 400 });
   }
@@ -54,20 +110,22 @@ export async function GET(
       return NextResponse.json({ ok: false, message: 'Order not found' }, { status: 404 });
     }
 
-    const raw = snap.data() || {};
+    // Document data may be DocumentData | undefined
+    const raw = (snap.data() ?? {}) as Record<string, unknown>;
 
-    // Normalize createdAt to ISO if possible (keeps frontend handling consistent)
-    const createdAtIso = tsToISO((raw as any).createdAt);
-    const orderData = {
+    // Normalize createdAt to ISO if possible
+    const createdAtIso = tsToISO(raw['createdAt']);
+    const orderData: Record<string, unknown> = {
       ...raw,
-      createdAt: createdAtIso ?? (raw.createdAt ?? null), // ISO string if convertible, else original value
+      createdAt: createdAtIso ?? raw['createdAt'] ?? null,
     };
 
     return NextResponse.json({ ok: true, order: { id: snap.id, ...orderData } }, { status: 200 });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('Error fetching order details:', err);
+    const msg = err instanceof Error ? err.message : String(err);
     return NextResponse.json(
-      { ok: false, message: `Error fetching order details: ${err?.message ?? 'unknown'}` },
+      { ok: false, message: `Error fetching order details: ${msg}` },
       { status: 500 }
     );
   }

@@ -1,6 +1,12 @@
-import { getBQClient } from "@/server/bq-handler";
+// src/app/api/items/route.ts  (or wherever this handler lives)
+import type { Job } from '@google-cloud/bigquery';
+import { getBQClient } from '@/server/bq-handler';
 
-export async function GET() {
+function isJobLike(v: unknown): v is Job {
+  return typeof v === 'object' && v !== null && typeof (v as Job).getQueryResults === 'function';
+}
+
+export async function GET(): Promise<Response> {
   try {
     const bq = getBQClient();
     const dataset = process.env.BQ_DATASET;
@@ -8,7 +14,6 @@ export async function GET() {
       return new Response(JSON.stringify({ error: 'Missing BQ_DATASET env var' }), { status: 400 });
     }
 
-    // details dataset can be overridden if Sample_details lives elsewhere
     const detailsDataset = process.env.BQ_DETAILS_DATASET || 'frono';
 
     const stockTable = `\`${process.env.BQ_PROJECT}.${dataset}.kolkata_stock\``;
@@ -48,18 +53,14 @@ export async function GET() {
         g.Stock_Out,
         g.Closing_Stock,
 
-        -- cleaned File_URL: remove the specific suffix '/view?usp=drivesdk' if present
         REPLACE(ANY_VALUE(s.File_URL), '/view?usp=drivesdk', '') AS File_URL,
 
-        -- details renamed (Concept_2 -> Concept, Concept_3 -> Fabric)
         ANY_VALUE(s.Product_Code) AS Product_Code,
         ANY_VALUE(s.Concept_2) AS Concept,
         ANY_VALUE(s.Concept_3) AS Fabric,
 
-        -- extract file id from the cleaned URL (if it matches /d/<id>/)
         REGEXP_EXTRACT(REPLACE(ANY_VALUE(s.File_URL), '/view?usp=drivesdk', ''), r'/d/([^/]+)') AS FileId,
 
-        -- use the cleaned url to build a Drive thumbnail link (nullable)
         IFNULL(
           CONCAT('https://drive.google.com/thumbnail?id=', REGEXP_EXTRACT(REPLACE(ANY_VALUE(s.File_URL), '/view?usp=drivesdk', ''), r'/d/([^/]+)')),
           NULL
@@ -79,20 +80,34 @@ export async function GET() {
       ORDER BY g.Item
     `;
 
-    const [job] = await bq.createQueryJob({
+    // call library and treat result as unknown first (some overloads return [Job,...], some return Job)
+    const createdRaw = (await bq.createQueryJob({
       query,
       useLegacySql: false,
-      timeoutMs: 120000,
-    });
+      jobTimeoutMs: 120_000, // correct option name for BigQuery
+    })) as unknown;
 
-    const [rows] = await job.getQueryResults();
+    // Narrow to Job in a type-safe manner
+    let job: Job;
+    if (Array.isArray(createdRaw) && createdRaw.length > 0) {
+      job = createdRaw[0] as Job;
+    } else if (isJobLike(createdRaw)) {
+      job = createdRaw;
+    } else {
+      throw new Error('Unexpected BigQuery createQueryJob response shape');
+    }
+
+    // getQueryResults returns a tuple [rows, apiResponse?]
+    const resultTuple = (await job.getQueryResults()) as [unknown[], unknown?];
+    const rows = resultTuple[0];
 
     return new Response(JSON.stringify(rows), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
-  } catch (err) {
+  } catch (err: unknown) {
     console.error('BQ grouping error:', err);
-    return new Response(JSON.stringify({ error: err.message || String(err) }), { status: 500 });
+    const message = err instanceof Error ? err.message : String(err);
+    return new Response(JSON.stringify({ error: message }), { status: 500 });
   }
 }

@@ -1,13 +1,15 @@
 'use client';
 
-import AuthGuard from '@/components/AuthGuard';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import Select, { StylesConfig } from 'react-select';
+import React, { JSX, useEffect, useMemo, useRef, useState } from 'react';
+import Select, { StylesConfig, OnChangeValue } from 'react-select';
 import { Tag, Zap } from 'lucide-react';
 import { useCart } from '@/context/CartContext';
+import Image from 'next/image';
+
+type Option = { value: string; label: string };
 
 type ItemRow = {
-  raw?: any;
+  raw?: Record<string, unknown>;
   id: string;
   name: string;
   colors: string[];
@@ -18,9 +20,39 @@ type ItemRow = {
   in_production?: boolean;
 };
 
-function getCleanFileUrl(fileUrl?: string) {
+type ApiRow = Record<string, unknown>;
+type ApiPayload = unknown; // can be array of rows or { rows: [...] }
+
+type CartAddItem = {
+  id: string;
+  name: string;
+  image: string;
+  colors: string[];
+  raw?: Record<string, unknown>;
+};
+
+type CartContextMinimal = {
+  addToCart: (item: CartAddItem) => void;
+  // expand this type if you need other methods from your actual context
+};
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+
+function getRowsFromPayload(payload: unknown): unknown[] {
+  if (Array.isArray(payload)) return payload as unknown[];
+  if (isObject(payload) && Array.isArray(payload['rows'])) return payload['rows'] as unknown[];
+  return [];
+}
+
+function getCleanFileUrl(fileUrl?: string): string | null {
   if (!fileUrl) return null;
-  return fileUrl.replace(/\/view\?usp=.*$/i, '');
+  try {
+    return String(fileUrl).replace(/\/view\?usp=.*$/i, '');
+  } catch {
+    return null;
+  }
 }
 
 function classifyStock(qty: number | null | undefined): 'low' | 'medium' | 'high' | 'unknown' {
@@ -39,7 +71,7 @@ function stockMeta(qty: number | null | undefined) {
   return { label: 'Unknown', shortLabel: 'Unknown', colorClass: 'bg-gray-600 text-white' };
 }
 
-const selectStyles: StylesConfig<any, true> = {
+const selectStyles: StylesConfig<Option, true> = {
   control: (provided) => ({
     ...provided,
     background: '#0f1724',
@@ -61,75 +93,94 @@ const selectStyles: StylesConfig<any, true> = {
   multiValueRemove: (provided) => ({ ...provided, color: '#94a3b8', ':hover': { background: '#374151', color: 'white' } }),
 };
 
-function toOptions(arr: string[] | undefined) {
+function toOptions(arr?: string[]): Option[] {
   if (!arr || !Array.isArray(arr)) return [];
   const uniq = Array.from(new Set(arr.map((s) => String(s || '').trim()).filter(Boolean))).sort();
   return uniq.map((v) => ({ value: v, label: v }));
 }
 
-function useDebounced(value: string, delay = 250) {
-  const [v, setV] = useState(value);
+function useDebounced(value: string, delay = 250): string {
+  const [v, setV] = useState<string>(value);
   useEffect(() => {
-    const t = setTimeout(() => setV(value), delay);
+    const t = window.setTimeout(() => setV(value), delay);
     return () => clearTimeout(t);
   }, [value, delay]);
   return v;
 }
 
-export default function ItemsPage() {
+export default function ItemsPage(): JSX.Element {
   const [items, setItems] = useState<ItemRow[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const { addToCart } = useCart();
+  const [isLoading, setIsLoading] = useState<boolean>(true);
+  const { addToCart } = useCart() as CartContextMinimal;
   const [addedMap, setAddedMap] = useState<Record<string, boolean>>({});
 
   // search + filters
-  const [searchText, setSearchText] = useState('');
+  const [searchText, setSearchText] = useState<string>('');
   const debouncedSearch = useDebounced(searchText, 250);
-  const [selectedConcepts, setSelectedConcepts] = useState<any[]>([]);
-  const [selectedFabrics, setSelectedFabrics] = useState<any[]>([]);
-  const [selectedColors, setSelectedColors] = useState<any[]>([]);
+  const [selectedConcepts, setSelectedConcepts] = useState<Option[]>([]);
+  const [selectedFabrics, setSelectedFabrics] = useState<Option[]>([]);
+  const [selectedColors, setSelectedColors] = useState<Option[]>([]);
   const [stockFilter, setStockFilter] = useState<'all' | 'low' | 'medium' | 'high'>('all');
 
   // pagination
-  const [pageSize, setPageSize] = useState<number>(12);
+  const [pageSize] = useState<number>(12);
   const [currentPage, setCurrentPage] = useState<number>(1);
 
   // lazy image observer
   const observersRef = useRef<Map<string, IntersectionObserver>>(new Map());
   const visibleRef = useRef<Record<string, boolean>>({});
-  const [, forceRerender] = useState(0);
+  const [, forceRerender] = useState<number>(0);
 
   // track when initial items have arrived so we can fetch designs_in_production once
-  const [itemsLoaded, setItemsLoaded] = useState(false);
+  const [itemsLoaded, setItemsLoaded] = useState<boolean>(false);
+
+  // broken images state
+  const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
+
+  // timers for add-to-cart ephemeral state
+  const addTimersRef = useRef<Record<string, number>>({});
 
   useEffect(() => {
     let canceled = false;
-    async function fetchItems() {
+    async function fetchItems(): Promise<void> {
       setIsLoading(true);
       try {
         const res = await fetch('/api/items');
+        const text = await res.text();
         if (!res.ok) {
-          console.error('Failed to fetch items', res.status);
-          setItems([]);
-          setItemsLoaded(true);
+          console.error('Failed to fetch items', res.status, text);
+          if (!canceled) {
+            setItems([]);
+            setItemsLoaded(true);
+          }
           return;
         }
-        const payload = await res.json();
-        const rawList = Array.isArray(payload) ? payload : Array.isArray(payload.rows) ? payload.rows : [];
 
-        const normalized: ItemRow[] = rawList.map((r: any) => {
-          const id = String((r.Item ?? r.Product_Code ?? r.Product_Code ?? '')).trim();
-          const name = String(r.Item ?? r.Product_Code ?? id).trim();
-          const colors = Array.isArray(r.Colors) ? r.Colors.map((c: any) => String(c).trim()).filter(Boolean) : [];
-          const thumbnail = r.Thumbnail_URL ?? r.thumbnail ?? null;
-          const fileUrl = getCleanFileUrl(r.File_URL ?? r.FileUrl ?? r.file_url);
-          const image = thumbnail || fileUrl || null;
-          const concept = r.Concept ?? r.Concept_2 ?? r.Concept_1 ?? null;
-          const fabric = r.Fabric ?? r.Concept_3 ?? null;
-          const closingStockRaw = r.Closing_Stock ?? r.ClosingStock ?? r.closing_stock ?? null;
+        let payload: ApiPayload;
+        try {
+          payload = JSON.parse(text) as ApiPayload;
+        } catch {
+          // fallback: maybe server returned raw JSON already stringified
+          payload = text as ApiPayload;
+        }
+
+        const rawList: unknown[] = getRowsFromPayload(payload);
+
+        const normalized: ItemRow[] = rawList.map((r: unknown) => {
+          const rec = (typeof r === 'object' && r !== null) ? (r as ApiRow) : {};
+          const idCandidate = rec['Item'] ?? rec['Product_Code'] ?? rec['product_code'] ?? '';
+          const id = String(idCandidate ?? '').trim();
+          const name = String(rec['Item'] ?? rec['Product_Code'] ?? id).trim();
+          const colors = Array.isArray(rec['Colors']) ? (rec['Colors'] as unknown[]).map((c) => String(c ?? '').trim()).filter(Boolean) : [];
+          const thumbnail = (rec['Thumbnail_URL'] ?? rec['thumbnail'] ?? null) as string | null;
+          const fileUrl = getCleanFileUrl((rec['File_URL'] ?? rec['FileUrl'] ?? rec['file_url']) as string | undefined);
+          const image = (thumbnail || fileUrl) ?? null;
+          const concept = (rec['Concept'] ?? rec['Concept_2'] ?? rec['Concept_1'] ?? null) as string | null;
+          const fabric = (rec['Fabric'] ?? rec['Concept_3'] ?? null) as string | null;
+          const closingStockRaw = rec['Closing_Stock'] ?? rec['ClosingStock'] ?? rec['closing_stock'] ?? null;
           const closingStockNum = closingStockRaw === null ? null : Number(closingStockRaw);
           return {
-            raw: r,
+            raw: rec,
             id,
             name,
             colors,
@@ -163,26 +214,35 @@ export default function ItemsPage() {
     if (!itemsLoaded) return;
     let canceled = false;
 
-    async function fetchDesignsInProd() {
+    async function fetchDesignsInProd(): Promise<void> {
       try {
         const res = await fetch('/api/designs_in_production');
+        const text = await res.text();
         if (!res.ok) {
-          console.warn('designs_in_production fetch failed', res.status);
+          console.warn('designs_in_production fetch failed', res.status, text);
           return;
         }
-        const payload = await res.json();
-        const rows = Array.isArray(payload) ? payload : Array.isArray(payload.rows) ? payload.rows : [];
+
+        let payload: ApiPayload;
+        try {
+          payload = JSON.parse(text) as ApiPayload;
+        } catch {
+          payload = text as ApiPayload;
+        }
+
+        const rows: unknown[] = getRowsFromPayload(payload);
 
         const codes = rows
-          .map((r: any) => {
+          .map((r: unknown) => {
             if (!r) return '';
             if (typeof r === 'string') return r;
-            return r.product_code ?? r.design_name ?? r.Design_Name ?? r.Product_Code ?? r.design ?? '';
+            const rec = r as ApiRow;
+            return String(rec['product_code'] ?? rec['design_name'] ?? rec['Design_Name'] ?? rec['Product_Code'] ?? rec['design'] ?? '').trim();
           })
-          .map((s: any) => String(s || '').trim().toLowerCase())
+          .map((s) => String(s || '').trim().toLowerCase())
           .filter(Boolean);
 
-        const codeSet = new Set(codes);
+        const codeSet = new Set<string>(codes);
 
         if (canceled) return;
 
@@ -207,9 +267,17 @@ export default function ItemsPage() {
   useEffect(() => {
     setCurrentPage(1);
     visibleRef.current = {};
-    observersRef.current.forEach((o) => o.disconnect());
+    // disconnect existing observers
+    observersRef.current.forEach((o) => {
+      try {
+        o.disconnect();
+      } catch {
+        // ignore
+      }
+    });
     observersRef.current.clear();
     forceRerender((n) => n + 1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSearch, selectedConcepts, selectedFabrics, selectedColors, stockFilter, pageSize]);
 
   // filtering logic
@@ -271,15 +339,35 @@ export default function ItemsPage() {
 
   // ensures currentPage valid when totalPages changes
   useEffect(() => {
-    if (currentPage > totalPages) setCurrentPage(1);
+    setCurrentPage((prev) => Math.min(prev, totalPages));
   }, [totalPages]);
 
+  // cleanup add-to-cart timers on unmount
+  useEffect(() => {
+    return () => {
+      Object.values(addTimersRef.current).forEach((id) => {
+        try {
+          clearTimeout(id);
+        } catch {
+          // ignore
+        }
+      });
+      addTimersRef.current = {};
+    };
+  }, []);
+
   // lazy observe element
-  function observeElement(id: string, el: HTMLElement | null) {
+  function observeElement(id: string, el: HTMLElement | null): void {
     if (!el) return;
     if (visibleRef.current[id]) return;
     const existing = observersRef.current.get(id);
-    if (existing) existing.disconnect();
+    if (existing) {
+      try {
+        existing.disconnect();
+      } catch {
+        // ignore
+      }
+    }
 
     const obs = new IntersectionObserver(
       (entries) => {
@@ -288,7 +376,11 @@ export default function ItemsPage() {
             visibleRef.current[id] = true;
             const o = observersRef.current.get(id);
             if (o) {
-              o.disconnect();
+              try {
+                o.disconnect();
+              } catch {
+                // ignore
+              }
               observersRef.current.delete(id);
             }
             forceRerender((s) => s + 1);
@@ -297,11 +389,15 @@ export default function ItemsPage() {
       },
       { root: null, rootMargin: '200px', threshold: 0.05 }
     );
-    obs.observe(el);
-    observersRef.current.set(id, obs);
+    try {
+      obs.observe(el);
+      observersRef.current.set(id, obs);
+    } catch {
+      // IntersectionObserver.observe may throw in some environments; ignore
+    }
   }
 
-  const handleAddToCart = (item: ItemRow) => {
+  const handleAddToCart = (item: ItemRow): void => {
     addToCart({
       id: item.id,
       name: item.name,
@@ -309,12 +405,25 @@ export default function ItemsPage() {
       colors: item.colors,
       raw: item.raw,
     });
+
     setAddedMap((m) => ({ ...m, [item.id]: true }));
-    setTimeout(() => setAddedMap((m) => ({ ...m, [item.id]: false })), 2500);
+
+    // clear existing timer for this item (if any)
+    if (addTimersRef.current[item.id]) {
+      clearTimeout(addTimersRef.current[item.id]);
+    }
+
+    // window.setTimeout returns number in browsers
+    const timerId = window.setTimeout(() => {
+      setAddedMap((m) => ({ ...m, [item.id]: false }));
+      delete addTimersRef.current[item.id];
+    }, 2500);
+
+    addTimersRef.current[item.id] = timerId;
   };
 
   // pagination UI helper: show a compact list with ellipses like [1,2,3,...,20]
-  function getPageButtons(current: number, total: number) {
+  function getPageButtons(current: number, total: number): (number | '...')[] {
     const out: (number | '...')[] = [];
     if (total <= 7) {
       for (let i = 1; i <= total; i++) out.push(i);
@@ -330,230 +439,232 @@ export default function ItemsPage() {
     return out;
   }
 
+  // typed handlers for react-select
+  const onConceptChange = (v: OnChangeValue<Option, true>) => setSelectedConcepts((v ?? []) as Option[]);
+  const onFabricChange = (v: OnChangeValue<Option, true>) => setSelectedFabrics((v ?? []) as Option[]);
+  const onColorChange = (v: OnChangeValue<Option, true>) => setSelectedColors((v ?? []) as Option[]);
+
   return (
-      <div className="container mx-auto px-4 py-8">
-        <div className="mb-6 grid grid-cols-1 lg:grid-cols-2 gap-4 items-center">
-          <div>
-            <input
-              value={searchText}
-              onChange={(e) => setSearchText(e.target.value)}
-              placeholder="Search by design, code, color, concept or fabric..."
-              className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-3 px-4 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
-              aria-label="Search items"
-            />
-          </div>
-
-          <div className="flex gap-3 items-center justify-end">
-            <div className="flex items-center gap-2 text-sm text-gray-300 mr-2">Stock</div>
-            {(['all', 'low', 'medium', 'high'] as const).map((s) => {
-              const active = stockFilter === s;
-              const label = s === 'all' ? 'All' : s === 'low' ? 'Low' : s === 'medium' ? 'Medium' : 'In stock';
-              return (
-                <button
-                  key={s}
-                  onClick={() => setStockFilter(s)}
-                  className={`px-3 py-2 rounded-md text-sm font-medium focus:outline-none ${active ? 'bg-gray-200 text-gray-900 shadow' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-                    }`}
-                  type="button"
-                  aria-pressed={active}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div className="mb-6 grid grid-cols-1 md:grid-cols-3 gap-3">
-          <Select
-            isMulti
-            options={conceptOptions}
-            value={selectedConcepts}
-            onChange={(v: any) => setSelectedConcepts(v || [])}
-            placeholder="Filter by concept..."
-            styles={selectStyles}
-            classNamePrefix="rs"
-          />
-          <Select
-            isMulti
-            options={fabricOptions}
-            value={selectedFabrics}
-            onChange={(v: any) => setSelectedFabrics(v || [])}
-            placeholder="Filter by fabric..."
-            styles={selectStyles}
-            classNamePrefix="rs"
-          />
-          <Select
-            isMulti
-            options={colorOptions}
-            value={selectedColors}
-            onChange={(v: any) => setSelectedColors(v || [])}
-            placeholder="Filter by colour..."
-            styles={selectStyles}
-            classNamePrefix="rs"
+    <div className="container mx-auto px-4 py-8">
+      <div className="mb-6 grid grid-cols-1 lg:grid-cols-2 gap-4 items-center">
+        <div>
+          <input
+            value={searchText}
+            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSearchText(e.target.value)}
+            placeholder="Search by design, code, color, concept or fabric..."
+            className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-3 px-4 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
+            aria-label="Search items"
           />
         </div>
 
-        {isLoading ? (
-          <div className="text-center p-8">Loading items...</div>
-        ) : paginatedItems.length === 0 ? (
-          <div className="text-center p-8">No items found.</div>
-        ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 gap-6">
-            {paginatedItems.map((item) => {
-              const wasAdded = Boolean(addedMap[item.id]);
-              const meta = stockMeta(item.closingStock);
-              const visible = !!visibleRef.current[item.id];
-
-              return (
-                <article key={item.id || item.name} className="bg-gray-800 rounded-lg shadow-lg overflow-hidden flex flex-col h-full">
-                  <div className="relative h-64 bg-gray-700 flex items-center justify-center overflow-hidden">
-                    <div
-                      ref={(el) => {
-                        if (el) observeElement(item.id, el);
-                      }}
-                      className="w-full h-full"
-                      aria-hidden
-                    >
-                      {visible && item.image ? (
-                        <img
-                          src={item.image}
-                          alt={item.name}
-                          className="w-full h-full object-cover"
-                          onError={(e) => {
-                            (e.currentTarget as HTMLImageElement).src = '/placeholder.svg';
-                          }}
-                        />
-                      ) : (
-                        <div className="w-full h-full bg-gray-800/60 flex items-center justify-center">
-                          <svg className="w-14 h-14 text-gray-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                            <rect x="3" y="4" width="18" height="14" rx="2" />
-                            <path d="M3 20h18" />
-                            <circle cx="8.5" cy="10.5" r="1.5" />
-                          </svg>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <div className="p-5 flex-1 flex flex-col">
-                    <h3 className="text-lg font-semibold text-white mb-2 truncate">{item.name}</h3>
-
-                    {item.concept && (
-                      <p className="text-sm text-gray-400 mb-1">
-                        <span className="text-gray-300 font-medium">Concept:</span> {item.concept}
-                      </p>
-                    )}
-                    {item.fabric && (
-                      <p className="text-sm text-gray-400 mb-2">
-                        <span className="text-gray-300 font-medium">Fabric:</span> {item.fabric}
-                      </p>
-                    )}
-
-                    <p className="text-sm text-gray-300 mb-2">
-                      <span className="font-medium text-gray-200">Colors:</span>{' '}
-                      {item.colors.length ? item.colors.join(', ') : '—'}
-                    </p>
-
-                    {/* small badges placed under details */}
-                    <div className="flex items-center gap-2 mb-3">
-                      {/* stock badge */}
-                      <span
-                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${meta.colorClass}`}
-                        title={`${meta.label} • ${item.closingStock ?? '-'}`}
-                      >
-                        <Tag className="h-3 w-3" />
-                        <span className="leading-none">{meta.shortLabel}{typeof item.closingStock === 'number' ? ` • ${item.closingStock}` : ''}</span>
-                      </span>
-
-                      {/* in production badge (blue) */}
-                      {item.in_production && (
-                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-600 text-white">
-                          <Zap className="h-3 w-3" />
-                          <span className="leading-none">In production</span>
-                        </span>
-                      )}
-                    </div>
-
-                    <div className="mt-auto">
-                      <button
-                        onClick={() => handleAddToCart(item)}
-                        className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded font-semibold text-white transition-colors ${wasAdded ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'
-                          }`}
-                        aria-pressed={wasAdded}
-                      >
-                        {wasAdded ? (
-                          <>
-                            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                              <path d="M20 6L9 17l-5-5" />
-                            </svg>
-                            <span>Added</span>
-                          </>
-                        ) : (
-                          <>
-                            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                              <path d="M6 6h15l-1.5 9h-13z" />
-                              <path d="M6 6L4 2" />
-                              <circle cx="10" cy="20" r="1" />
-                              <circle cx="18" cy="20" r="1" />
-                            </svg>
-                            <span>Add to Cart</span>
-                          </>
-                        )}
-                      </button>
-                    </div>
-                  </div>
-                </article>
-              );
-            })}
-          </div>
-        )}
-
-        {/* bottom pagination (mirror of top) */}
-        <div className="mt-6 flex items-center justify-between">
-          <div />
-          <nav className="inline-flex items-center gap-2" aria-label="Pagination bottom">
-            <button
-              onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
-              disabled={safeCurrentPage === 1}
-              className={`px-3 py-2 rounded-md border ${safeCurrentPage === 1 ? 'text-gray-500 border-gray-700' : 'text-gray-200 border-gray-600 hover:bg-gray-700'}`}
-              aria-label="Previous page"
-              type="button"
-            >
-              ← Previous
-            </button>
-
-            {getPageButtons(safeCurrentPage, totalPages).map((p, i) =>
-              p === '...' ? (
-                <span key={`dots-b-${i}`} className="px-2 text-gray-400">
-                  …
-                </span>
-              ) : (
-                <button
-                  key={`b-${p}`}
-                  onClick={() => setCurrentPage(Number(p))}
-                  aria-current={safeCurrentPage === p ? 'page' : undefined}
-                  className={`px-3 py-2 rounded-md border ${safeCurrentPage === p ? 'bg-white text-gray-900 border-gray-300' : 'text-gray-200 border-gray-600 hover:bg-gray-700'
-                    }`}
-                  type="button"
-                >
-                  {p}
-                </button>
-              )
-            )}
-
-            <button
-              onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
-              disabled={safeCurrentPage === totalPages}
-              className={`px-3 py-2 rounded-md border ${safeCurrentPage === totalPages ? 'text-gray-500 border-gray-700' : 'text-gray-200 border-gray-600 hover:bg-gray-700'}`}
-              aria-label="Next page"
-              type="button"
-            >
-              Next →
-            </button>
-          </nav>
+        <div className="flex gap-3 items-center justify-end">
+          <div className="flex items-center gap-2 text-sm text-gray-300 mr-2">Stock</div>
+          {(['all', 'low', 'medium', 'high'] as const).map((s) => {
+            const active = stockFilter === s;
+            const label = s === 'all' ? 'All' : s === 'low' ? 'Low' : s === 'medium' ? 'Medium' : 'In stock';
+            return (
+              <button
+                key={s}
+                onClick={() => setStockFilter(s)}
+                className={`px-3 py-2 rounded-md text-sm font-medium focus:outline-none ${active ? 'bg-gray-200 text-gray-900 shadow' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
+                  }`}
+                type="button"
+                aria-pressed={active}
+              >
+                {label}
+              </button>
+            );
+          })}
         </div>
       </div>
-    
+
+      <div className="mb-6 grid grid-cols-1 md:grid-cols-3 gap-3">
+        <Select
+          isMulti
+          options={conceptOptions}
+          value={selectedConcepts}
+          onChange={onConceptChange}
+          placeholder="Filter by concept..."
+          styles={selectStyles}
+          classNamePrefix="rs"
+        />
+        <Select
+          isMulti
+          options={fabricOptions}
+          value={selectedFabrics}
+          onChange={onFabricChange}
+          placeholder="Filter by fabric..."
+          styles={selectStyles}
+          classNamePrefix="rs"
+        />
+        <Select
+          isMulti
+          options={colorOptions}
+          value={selectedColors}
+          onChange={onColorChange}
+          placeholder="Filter by colour..."
+          styles={selectStyles}
+          classNamePrefix="rs"
+        />
+      </div>
+
+      {isLoading ? (
+        <div className="text-center p-8">Loading items...</div>
+      ) : paginatedItems.length === 0 ? (
+        <div className="text-center p-8">No items found.</div>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 gap-6">
+          {paginatedItems.map((item, index) => {
+            const wasAdded = Boolean(addedMap[item.id]);
+            const meta = stockMeta(item.closingStock);
+            const visible = !!visibleRef.current[item.id];
+
+            return (
+              <article key={item.id || `${item.name}-${index}`} className="bg-gray-800 rounded-lg shadow-lg overflow-hidden flex flex-col h-full">
+                <div className="relative h-64 bg-gray-700 flex items-center justify-center overflow-hidden">
+                  <div
+                    ref={(el) => {
+                      if (el) observeElement(item.id, el);
+                    }}
+                    className="w-full h-full"
+                    aria-hidden
+                  >
+                    {visible && item.image && !brokenImages[item.id] ? (
+                      <Image
+                        src={item.image}
+                        alt={item.name}
+                        fill
+                        style={{ objectFit: 'cover' }}
+                        onError={() => setBrokenImages((b) => ({ ...b, [item.id]: true }))}
+                        quality={72}
+                        sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
+                      />
+                    ) : (
+                      <div className="w-full h-full bg-gray-800/60 flex items-center justify-center">
+                        <svg className="w-14 h-14 text-gray-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                          <rect x="3" y="4" width="18" height="14" rx="2" />
+                          <path d="M3 20h18" />
+                          <circle cx="8.5" cy="10.5" r="1.5" />
+                        </svg>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="p-5 flex-1 flex flex-col">
+                  <h3 className="text-lg font-semibold text-white mb-2 truncate">{item.name}</h3>
+
+                  {item.concept && (
+                    <p className="text-sm text-gray-400 mb-1">
+                      <span className="text-gray-300 font-medium">Concept:</span> {item.concept}
+                    </p>
+                  )}
+                  {item.fabric && (
+                    <p className="text-sm text-gray-400 mb-2">
+                      <span className="text-gray-300 font-medium">Fabric:</span> {item.fabric}
+                    </p>
+                  )}
+
+                  <p className="text-sm text-gray-300 mb-2">
+                    <span className="font-medium text-gray-200">Colors:</span>{' '}
+                    {item.colors.length ? item.colors.join(', ') : '—'}
+                  </p>
+
+                  {/* small badges placed under details */}
+                  <div className="flex items-center gap-2 mb-3">
+                    {/* stock badge */}
+                    <span
+                      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${meta.colorClass}`}
+                      title={`${meta.label} • ${item.closingStock ?? '-'}`}
+                    >
+                      <Tag className="h-3 w-3" />
+                      <span className="leading-none">{meta.shortLabel}{typeof item.closingStock === 'number' ? ` • ${item.closingStock}` : ''}</span>
+                    </span>
+
+                    {/* in production badge (blue) */}
+                    {item.in_production && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-600 text-white">
+                        <Zap className="h-3 w-3" />
+                        <span className="leading-none">In production</span>
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="mt-auto">
+                    <button
+                      onClick={() => handleAddToCart(item)}
+                      className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded font-semibold text-white transition-colors ${wasAdded ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'
+                        }`}
+                      aria-pressed={wasAdded}
+                    >
+                      {wasAdded ? (
+                        <>
+                          <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <path d="M20 6L9 17l-5-5" />
+                          </svg>
+                          <span>Added</span>
+                        </>
+                      ) : (
+                        <>
+                          <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                            <path d="M6 6h15l-1.5 9h-13z" />
+                            <path d="M6 6L4 2" />
+                            <circle cx="10" cy="20" r="1" />
+                            <circle cx="18" cy="20" r="1" />
+                          </svg>
+                          <span>Add to Cart</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      )}
+
+      {/* bottom pagination (mirror of top) */}
+      <div className="mt-6 flex items-center justify-between">
+        <div />
+        <nav className="inline-flex items-center gap-2" aria-label="Pagination bottom">
+          <button
+            onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
+            disabled={safeCurrentPage === 1}
+            className={`px-3 py-2 rounded-md border ${safeCurrentPage === 1 ? 'text-gray-500 border-gray-700' : 'text-gray-200 border-gray-600 hover:bg-gray-700'}`}
+            aria-label="Previous page"
+            type="button"
+          >
+            ← Previous
+          </button>
+
+          {getPageButtons(safeCurrentPage, totalPages).map((p, i) =>
+            p === '...' ? (
+              <span key={`dots-b-${i}`} className="px-2 text-gray-400">…</span>
+            ) : (
+              <button
+                key={`b-${p}`}
+                onClick={() => setCurrentPage(Number(p))}
+                aria-current={safeCurrentPage === p ? 'page' : undefined}
+                className={`px-3 py-2 rounded-md border ${safeCurrentPage === p ? 'bg-white text-gray-900 border-gray-300' : 'text-gray-200 border-gray-600 hover:bg-gray-700'}`}
+                type="button"
+              >
+                {p}
+              </button>
+            )
+          )}
+
+          <button
+            onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
+            disabled={safeCurrentPage === totalPages}
+            className={`px-3 py-2 rounded-md border ${safeCurrentPage === totalPages ? 'text-gray-500 border-gray-700' : 'text-gray-200 border-gray-600 hover:bg-gray-700'}`}
+            aria-label="Next page"
+            type="button"
+          >
+            Next →
+          </button>
+        </nav>
+      </div>
+    </div>
   );
 }

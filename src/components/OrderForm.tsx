@@ -1,38 +1,76 @@
 'use client';
-import React, { useEffect, useState } from 'react';
-import Select from 'react-select';
+import React, { JSX, useEffect, useState } from 'react';
+import Select, { StylesConfig } from 'react-select';
 import { FaTrash, FaPencilAlt } from 'react-icons/fa';
 
-export default function OrderForm({ closeModal, refreshOrders }) {
-  const [step, setStep] = useState(1);
+/* --- Types --- */
+type OptionType = {
+  value: string;
+  label: string;
+  id?: string | number;
+  Company_Name?: string;
+  Email?: string;
+  email?: string;
+  Number?: string;
+  phone?: string;
+  Broker?: string;
+  Agent_Name?: string;
+  agent_id?: string | number;
+  [k: string]: unknown;
+};
+
+type ItemType = OptionType & {
+  Item?: string;
+  sku?: string;
+  Colors?: unknown;
+  colors?: unknown;
+  colors_string?: unknown;
+};
+
+type OrderRow = {
+  item: ItemType;
+  color: string;
+  quantity: number | string;
+};
+
+/* --- Props --- */
+export default function OrderForm({
+  closeModal,
+  refreshOrders,
+}: {
+  closeModal?: () => void;
+  refreshOrders?: () => void;
+}): JSX.Element {
+  const [step, setStep] = useState<number>(1);
 
   // fetched data
-  const [customers, setCustomers] = useState([]);
-  const [agents, setAgents] = useState([]);
-  const [availableItems, setAvailableItems] = useState([]);
+  const [customers, setCustomers] = useState<OptionType[]>([]);
+  const [agents, setAgents] = useState<OptionType[]>([]);
+  const [availableItems, setAvailableItems] = useState<ItemType[]>([]);
 
   // step1
-  const [selectedCustomer, setSelectedCustomer] = useState(null);
-  const [customerEmail, setCustomerEmail] = useState('');
-  const [customerPhone, setCustomerPhone] = useState('');
-  const [selectedAgent, setSelectedAgent] = useState(null);
-  const [agentPhone, setAgentPhone] = useState('');
+  const [selectedCustomer, setSelectedCustomer] = useState<OptionType | null>(null);
+  const [customerEmail, setCustomerEmail] = useState<string>('');
+  const [customerPhone, setCustomerPhone] = useState<string>('');
+  const [selectedAgent, setSelectedAgent] = useState<OptionType | null>(null);
+  const [agentPhone, setAgentPhone] = useState<string>('');
 
   // step2
-  const [orderItems, setOrderItems] = useState([]);
-  const [currentItem, setCurrentItem] = useState(null);
-  const [availableColors, setAvailableColors] = useState([]); // for selected item
-  const [selectedColors, setSelectedColors] = useState([]); // user-selected colors (array)
-  const [currentQty, setCurrentQty] = useState(''); // blank initially
-  const [editingIndex, setEditingIndex] = useState(null); // index for editing a row
+  const [orderItems, setOrderItems] = useState<OrderRow[]>([]);
+  const [currentItem, setCurrentItem] = useState<ItemType | null>(null);
+  const [availableColors, setAvailableColors] = useState<string[]>([]); // for selected item
+  const [selectedColors, setSelectedColors] = useState<string[]>([]); // user-selected colors (array)
+  const [currentQty, setCurrentQty] = useState<string>(''); // blank initially
+  const [editingIndex, setEditingIndex] = useState<number | null>(null); // index for editing a row
 
   // global
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [error, setError] = useState('');
-  const [itemError, setItemError] = useState('');
-  const [step1Error, setStep1Error] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
+  const [error, setError] = useState<string>('');
+  const [itemError, setItemError] = useState<string>('');
+  const [step1Error, setStep1Error] = useState<string>('');
 
-  const customStyles = {
+  /* --- react-select style typing --- */
+  const customStyles: StylesConfig<OptionType, false> = {
     control: (provided) => ({
       ...provided,
       backgroundColor: '#1f2937',
@@ -52,7 +90,7 @@ export default function OrderForm({ closeModal, refreshOrders }) {
   };
 
   useEffect(() => {
-    async function fetchData() {
+    async function fetchData(): Promise<void> {
       try {
         const [customersRes, agentsRes, itemsRes] = await Promise.all([
           fetch('/api/customers'),
@@ -60,56 +98,70 @@ export default function OrderForm({ closeModal, refreshOrders }) {
           fetch('/api/items'),
         ]);
 
-        const customersData = customersRes.ok ? await customersRes.json() : { rows: [] };
-        const agentsData = agentsRes.ok ? await agentsRes.json() : { rows: [] };
-        const itemsData = itemsRes.ok ? await itemsRes.json() : { rows: [] };
+        const customersData = customersRes.ok ? await customersRes.json().catch(() => ({ rows: [] })) : { rows: [] };
+        const agentsData = agentsRes.ok ? await agentsRes.json().catch(() => ({ rows: [] })) : { rows: [] };
+        const itemsData = itemsRes.ok ? await itemsRes.json().catch(() => ({ rows: [] })) : { rows: [] };
 
-        if (customersData.rows && Array.isArray(customersData.rows)) {
-          setCustomers(
-            customersData.rows.map((c) => ({
-              ...c,
-              value: c.Company_Name ?? c.company_name ?? String(c.id ?? ''),
-              label: `${c.Company_Name ?? c.company_name ?? 'Unknown'}${c.City ? ` [${c.City}]` : ''}`,
-            }))
-          );
+        if (customersData && Array.isArray((customersData as { rows?: unknown }).rows)) {
+          const rows = (customersData as { rows: unknown[] }).rows;
+          const mapped = rows.map((cRaw) => {
+            const c = (cRaw as Record<string, unknown>) || {};
+            const company = (c.Company_Name ?? c.company_name ?? '') as string;
+            const city = (c.City ?? '') as string;
+            return {
+              ...(c as Record<string, unknown>),
+              value: (c.Company_Name ?? c.company_name ?? String(c.id ?? '')) as string,
+              label: `${company || 'Unknown'}${city ? ` [${city}]` : ''}`,
+            } as OptionType;
+          });
+          setCustomers(mapped);
         }
 
-        if (agentsData.rows && Array.isArray(agentsData.rows)) {
-          setAgents(
-            agentsData.rows.map((a) => ({
-              ...a,
-              value: a.Company_Name ?? a.name ?? String(a.id ?? ''),
-              label: a.Company_Name ?? a.name ?? String(a.id ?? ''),
-              number: a.Number ?? a.phone ?? a.Contact_Number ?? a.contact_number ?? '',
-            }))
-          );
+        if (agentsData && Array.isArray((agentsData as { rows?: unknown }).rows)) {
+          const rows = (agentsData as { rows: unknown[] }).rows;
+          const mapped = rows.map((aRaw) => {
+            const a = (aRaw as Record<string, unknown>) || {};
+            return {
+              ...(a as Record<string, unknown>),
+              value: (a.Company_Name ?? a.name ?? String(a.id ?? '')) as string,
+              label: (a.Company_Name ?? a.name ?? String(a.id ?? '')) as string,
+              number: (a.Number ?? a.phone ?? a.Contact_Number ?? a.contact_number ?? '') as string,
+            } as OptionType;
+          });
+          setAgents(mapped);
         }
 
-        if (itemsData.rows && Array.isArray(itemsData.rows)) {
-          const normalized = itemsData.rows.map((i) => {
-            let colors = [];
-            if (Array.isArray(i.Colors)) colors = i.Colors;
-            else if (Array.isArray(i.colors)) colors = i.colors;
-            else if (i.colors_string) colors = String(i.colors_string).split(',').map((s) => s.trim()).filter(Boolean);
-            else if (i.Color) colors = [String(i.Color).trim()];
+        if (itemsData && Array.isArray((itemsData as { rows?: unknown }).rows)) {
+          const rows = (itemsData as { rows: unknown[] }).rows;
+          const normalized = rows.map((iRaw) => {
+            const i = (iRaw as Record<string, unknown>) || {};
+            // collect colors in multiple legacy shapes
+            let colors: string[] = [];
+            if (Array.isArray(i.Colors)) colors = (i.Colors as unknown[]).map(String);
+            else if (Array.isArray(i.colors)) colors = (i.colors as unknown[]).map(String);
+            else if (i.colors_string) {
+              colors = String(i.colors_string).split(',').map((s) => s.trim()).filter(Boolean);
+            } else if (i.Color) colors = [String(i.Color).trim()];
 
             colors = Array.from(new Set(colors.map((c) => String(c || '').trim()).filter((c) => c && c.toLowerCase() !== 'nan')));
 
             return {
-              ...i,
-              value: i.Item ?? i.sku ?? String(i.id ?? ''),
-              label: i.Item ?? i.sku ?? String(i.id ?? ''),
+              ...(i as Record<string, unknown>),
+              value: (i.Item ?? i.sku ?? String(i.id ?? '')) as string,
+              label: (i.Item ?? i.sku ?? String(i.id ?? '')) as string,
               colors,
-            };
+            } as ItemType;
           });
           setAvailableItems(normalized);
         }
-      } catch (err) {
-        console.error('fetchData error', err);
+      } catch (errUnknown) {
+        // runtime-safe logging
+        // eslint-disable-next-line no-console
+        console.error('fetchData error', errUnknown);
         setError('Failed to load necessary data.');
       }
     }
-    fetchData();
+    void fetchData();
   }, []);
 
   // Autofill agent if customer's Broker/Agent_Name matches an agent
@@ -122,28 +174,29 @@ export default function OrderForm({ closeModal, refreshOrders }) {
       return;
     }
 
-    setCustomerEmail(selectedCustomer.Email ?? selectedCustomer.email ?? '');
-    setCustomerPhone(selectedCustomer.Number ?? selectedCustomer.phone ?? '');
+    const sc = selectedCustomer as Record<string, unknown>;
+    setCustomerEmail((sc.Email as string) ?? (sc.email as string) ?? '');
+    setCustomerPhone((sc.Number as string) ?? (sc.phone as string) ?? '');
 
-    const brokerName = (selectedCustomer.Broker ?? selectedCustomer.Agent_Name ?? selectedCustomer.broker ?? '').toString().trim();
+    const brokerName = String(sc.Broker ?? sc.Agent_Name ?? sc.broker ?? '').trim();
     if (brokerName) {
       const found = agents.find((a) => {
-        const name = (a.Company_Name ?? a.value ?? a.label ?? '').toString().trim();
+        const name = String(a.Company_Name ?? a.value ?? a.label ?? '').trim();
         return name && name.toLowerCase() === brokerName.toLowerCase();
       });
       if (found) {
         setSelectedAgent(found);
-        setAgentPhone(found.number ?? found.phone ?? found.Contact_Number ?? '');
+        setAgentPhone((found.number as string) ?? (found.phone as string) ?? (found.Contact_Number as string) ?? '');
         return;
       }
     }
 
     const agentById = agents.find(
-      (a) => String(a.id ?? a.agent_id ?? '').toLowerCase() === String(selectedCustomer.agent_id ?? selectedCustomer.Agent_ID ?? '').toLowerCase()
+      (a) => String(a.id ?? a.agent_id ?? '').toLowerCase() === String(sc.agent_id ?? sc.Agent_ID ?? '').toLowerCase()
     );
     if (agentById) {
       setSelectedAgent(agentById);
-      setAgentPhone(agentById.number ?? agentById.phone ?? '');
+      setAgentPhone((agentById.number as string) ?? (agentById.phone as string) ?? '');
       return;
     }
 
@@ -151,45 +204,45 @@ export default function OrderForm({ closeModal, refreshOrders }) {
     setAgentPhone('');
   }, [selectedCustomer, agents]);
 
-  const handleCustomerChange = (opt) => {
-    setSelectedCustomer(opt || null);
+  /* --- handlers with typed params --- */
+  const handleCustomerChange = (opt: OptionType | null): void => {
+    setSelectedCustomer(opt);
     setStep1Error('');
     setError('');
   };
 
-  const handleAgentChange = (opt) => {
-    setSelectedAgent(opt || null);
-    setAgentPhone(opt?.number ?? opt?.phone ?? '');
+  const handleAgentChange = (opt: OptionType | null): void => {
+    setSelectedAgent(opt);
+    setAgentPhone((opt as Record<string, unknown>)?.number as string ?? (opt as Record<string, unknown>)?.phone as string ?? '');
     setStep1Error('');
   };
 
-  // WHEN AN ITEM IS SELECTED -> populate availableColors with all colors for that item
-  const handleItemChange = (opt) => {
-    setCurrentItem(opt || null);
+  const handleItemChange = (opt: ItemType | null): void => {
+    setCurrentItem(opt);
     setSelectedColors([]);
     setCurrentQty('');
     setItemError('');
     setEditingIndex(null);
 
     if (opt && Array.isArray(opt.colors) && opt.colors.length > 0) {
-      setAvailableColors(opt.colors);
+      setAvailableColors(opt.colors.map(String));
     } else {
       setAvailableColors([]);
     }
   };
 
-  const toggleColor = (color) => {
+  const toggleColor = (color: string): void => {
     setSelectedColors((prev) => (prev.includes(color) ? prev.filter((c) => c !== color) : [...prev, color]));
     setItemError('');
   };
 
   // Validation conditions: at least 3 colors, qty > 0
-  const canAddOrUpdate = () => {
+  const canAddOrUpdate = (): boolean => {
     const qtyNum = Number(currentQty);
-    return currentItem && Array.isArray(selectedColors) && selectedColors.length >= 3 && !Number.isNaN(qtyNum) && qtyNum > 0;
+    return !!currentItem && Array.isArray(selectedColors) && selectedColors.length >= 3 && !Number.isNaN(qtyNum) && qtyNum > 0;
   };
 
-  const handleAddOrUpdateItem = () => {
+  const handleAddOrUpdateItem = (): void => {
     setItemError('');
     if (!currentItem) {
       setItemError('Please select an item.');
@@ -205,10 +258,8 @@ export default function OrderForm({ closeModal, refreshOrders }) {
       return;
     }
 
-    // if editing a single existing row: update that row (we only allow one-color per row for edit)
     if (editingIndex !== null && editingIndex >= 0 && editingIndex < orderItems.length) {
       const updated = [...orderItems];
-      // when editing we update the row to first selected color (consistent with single-row edit)
       updated[editingIndex] = {
         item: currentItem,
         color: selectedColors[0],
@@ -217,7 +268,6 @@ export default function OrderForm({ closeModal, refreshOrders }) {
       setOrderItems(updated);
       setEditingIndex(null);
     } else {
-      // create new entries: one row per selected color (user selected at least 3)
       const newEntries = selectedColors.map((col) => ({
         item: currentItem,
         color: col,
@@ -233,18 +283,18 @@ export default function OrderForm({ closeModal, refreshOrders }) {
     setCurrentQty('');
   };
 
-  const handleEditRow = (index) => {
+  const handleEditRow = (index: number): void => {
     const row = orderItems[index];
     if (!row) return;
     setEditingIndex(index);
     setCurrentItem(row.item ?? null);
-    setAvailableColors(row.item?.colors ?? []);
+    setAvailableColors(row.item?.colors ? (row.item.colors as unknown[]).map(String) : []);
     setSelectedColors([row.color]);
-    setCurrentQty(row.quantity ?? '');
+    setCurrentQty(String(row.quantity ?? ''));
     setStep(2);
   };
 
-  const handleDeleteRow = (index) => {
+  const handleDeleteRow = (index: number): void => {
     setOrderItems((prev) => prev.filter((_, i) => i !== index));
     if (editingIndex === index) {
       setEditingIndex(null);
@@ -255,7 +305,7 @@ export default function OrderForm({ closeModal, refreshOrders }) {
     }
   };
 
-  const validateStep1 = () => {
+  const validateStep1 = (): boolean => {
     if (!selectedCustomer) {
       setStep1Error('Please select a customer.');
       return false;
@@ -268,7 +318,7 @@ export default function OrderForm({ closeModal, refreshOrders }) {
     return true;
   };
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async (e: React.FormEvent<HTMLFormElement>): Promise<void> => {
     e.preventDefault();
     setError('');
     if (!validateStep1()) return;
@@ -288,8 +338,8 @@ export default function OrderForm({ closeModal, refreshOrders }) {
     try {
       const payload = {
         customer: {
-          id: selectedCustomer.id ?? selectedCustomer.value ?? null,
-          name: selectedCustomer.label ?? selectedCustomer.value ?? '',
+          id: selectedCustomer?.id ?? selectedCustomer?.value ?? null,
+          name: selectedCustomer?.label ?? selectedCustomer?.value ?? '',
           email: customerEmail,
           phone: customerPhone,
         },
@@ -302,7 +352,7 @@ export default function OrderForm({ closeModal, refreshOrders }) {
           sku: it.item?.value ?? it.item?.Item ?? it.item?.sku ?? '',
           itemName: it.item?.label ?? it.item?.Item ?? '',
           color: it.color,
-          quantity: parseInt(it.quantity, 10),
+          quantity: parseInt(String(it.quantity), 10),
         })),
       };
 
@@ -315,17 +365,18 @@ export default function OrderForm({ closeModal, refreshOrders }) {
       if (!res.ok) {
         const contentType = res.headers.get('content-type') ?? '';
         if (contentType.includes('application/json')) {
-          const json = await res.json();
-          setError(json.error || 'Failed to create order.');
+          const json = await res.json().catch(() => ({}));
+          setError((json as Record<string, unknown>).error as string ?? 'Failed to create order.');
         } else {
           setError('Failed to create order.');
         }
       } else {
-        refreshOrders && refreshOrders();
-        closeModal && closeModal();
+        if (typeof refreshOrders === 'function') refreshOrders();
+        if (typeof closeModal === 'function') closeModal();
       }
-    } catch (err) {
-      console.error('submit error', err);
+    } catch (errUnknown) {
+      // eslint-disable-next-line no-console
+      console.error('submit error', errUnknown);
       setError('An unexpected error occurred.');
     } finally {
       setIsSubmitting(false);
@@ -342,7 +393,15 @@ export default function OrderForm({ closeModal, refreshOrders }) {
         <div>
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Customer</label>
-            <Select styles={customStyles} options={customers} value={selectedCustomer} onChange={handleCustomerChange} isClearable isSearchable placeholder="Select customer..." />
+            <Select
+              styles={customStyles}
+              options={customers}
+              value={selectedCustomer}
+              onChange={(opt) => handleCustomerChange(opt as OptionType | null)}
+              isClearable
+              isSearchable
+              placeholder="Select customer..."
+            />
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
@@ -358,7 +417,15 @@ export default function OrderForm({ closeModal, refreshOrders }) {
 
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Agent</label>
-            <Select styles={customStyles} options={agents} value={selectedAgent} onChange={handleAgentChange} isClearable isSearchable placeholder="Select agent..." />
+            <Select
+              styles={customStyles}
+              options={agents}
+              value={selectedAgent}
+              onChange={(opt) => handleAgentChange(opt as OptionType | null)}
+              isClearable
+              isSearchable
+              placeholder="Select agent..."
+            />
           </div>
 
           <div className="mb-4">
@@ -392,7 +459,7 @@ export default function OrderForm({ closeModal, refreshOrders }) {
                 styles={customStyles}
                 options={availableItems}
                 value={currentItem}
-                onChange={handleItemChange}
+                onChange={(opt) => handleItemChange(opt as ItemType | null)}
                 placeholder="Select item..."
                 isClearable
                 isSearchable
@@ -426,9 +493,7 @@ export default function OrderForm({ closeModal, refreshOrders }) {
                       key={c}
                       type="button"
                       onClick={() => toggleColor(c)}
-                      className={`px-3 py-1 rounded-full text-sm font-semibold focus:outline-none transition ${
-                        selected ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-200 hover:bg-gray-600'
-                      }`}
+                      className={`px-3 py-1 rounded-full text-sm font-semibold focus:outline-none transition ${selected ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-200 hover:bg-gray-600'}`}
                     >
                       {c}
                     </button>

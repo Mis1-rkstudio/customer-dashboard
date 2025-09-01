@@ -1,35 +1,43 @@
-
-
 import { getBQClient } from "@/server/bq-handler";
 
 export async function GET() {
   try {
     const bq = getBQClient();
+
+    const project = process.env.BQ_PROJECT;
     const dataset = process.env.BQ_DATASET;
-    if (!dataset) {
-      return new Response(JSON.stringify({ error: 'Missing BQ_DATASET env var' }), { status: 400 });
+    const tableName = process.env.BQ_TABLE ?? "Vastra_clean";
+
+    if (!project || !dataset) {
+      return new Response(
+        JSON.stringify({ error: "Missing BQ_PROJECT or BQ_DATASET env var" }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
     }
 
-    const table = `\`round-kit-450201-r9.frono.Vastra_clean\``;
+    // fully-qualified table name: `project.dataset.table`
+    const tableRef = `\`${project}.${dataset}.${tableName}\``;
 
     // case-insensitive match for stage LIKE '%production%' and jobslip_status LIKE '%pending%'
-    const query = `SELECT * FROM \`${process.env.BQ_PROJECT}\`.frono.Vastra_clean WHERE stage LIKE '%Production%' AND jobslip_status LIKE '%Pending%'`;
+    const query = `SELECT * FROM ${tableRef} WHERE LOWER(stage) LIKE '%production%' AND LOWER(jobslip_status) LIKE '%pending%'`;
 
     const [job] = await bq.createQueryJob({
       query,
       useLegacySql: false,
-      timeoutMs: 120000,
+      jobTimeoutMs: 120000,
     });
 
     const [rows] = await job.getQueryResults();
 
     return new Response(JSON.stringify(rows), {
       status: 200,
-      headers: { 'Content-Type': 'application/json' },
+      headers: { "Content-Type": "application/json" },
     });
   } catch (err) {
-    console.error('BQ grouping error:', err);
-    return new Response(JSON.stringify({ error: err.message || String(err) }), { status: 500 });
+    console.error("BQ grouping error:", err);
+    return new Response(
+      JSON.stringify({ error: (err as Error)?.message ?? String(err) }),
+      { status: 500, headers: { "Content-Type": "application/json" } }
+    );
   }
 }
-

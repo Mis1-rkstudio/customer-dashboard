@@ -1,26 +1,58 @@
-// components/ShareOrder.tsx
 'use client';
 
-import React, { useState } from 'react';
+import React, { JSX, useState } from 'react';
 import { FaShareAlt } from 'react-icons/fa';
 
 type OrderItem = { itemName?: string; color?: string; quantity?: number };
+
 export type OrderShape = {
   id?: string;
   customer?: { name?: string; phone?: string; email?: string };
   agent?: { name?: string; number?: string; email?: string };
   items?: OrderItem[];
-  createdAt?: string | { seconds?: number };
+  createdAt?: string | number | Date | { seconds?: number } | null;
   source?: string;
 };
 
-function formatDateStamp(d: any) {
-  if (!d) return '—';
-  if (typeof d === 'object' && d?.seconds) return new Date(d.seconds * 1000).toLocaleString();
-  try { return new Date(d).toLocaleString(); } catch { return String(d); }
+function formatDateStamp(d: unknown): string {
+  if (d === null || d === undefined) return '—';
+
+  // Firestore style { seconds }
+  if (typeof d === 'object' && d !== null) {
+    const rec = d as Record<string, unknown>;
+    if ('seconds' in rec && typeof rec.seconds === 'number') {
+      const seconds = Number(rec.seconds);
+      if (!Number.isNaN(seconds)) {
+        return new Date(seconds * 1000).toLocaleString();
+      }
+    }
+  }
+
+  // Date instance
+  if (d instanceof Date) {
+    if (!isNaN(d.getTime())) return d.toLocaleString();
+    return String(d);
+  }
+
+  // numeric epoch
+  if (typeof d === 'number') {
+    const dt = new Date(d);
+    if (!isNaN(dt.getTime())) return dt.toLocaleString();
+    return String(d);
+  }
+
+  // string/ISO
+  try {
+    const s = String(d);
+    const dt = new Date(s);
+    if (!isNaN(dt.getTime())) return dt.toLocaleString();
+    return s;
+  } catch {
+    return String(d);
+  }
 }
 
-function buildOrderMessage(order: OrderShape, orderUrl?: string) {
+function buildOrderMessage(order: OrderShape, orderUrl?: string): string {
   const lines: string[] = [];
   lines.push('🧾 Order Summary');
   if (order.id) lines.push(`Order ID: ${order.id}`);
@@ -38,7 +70,7 @@ function buildOrderMessage(order: OrderShape, orderUrl?: string) {
   lines.push('');
   lines.push('Items:');
 
-  const items = order.items ?? [];
+  const items: OrderItem[] = order.items ?? [];
   if (items.length === 0) {
     lines.push('  (no items)');
   } else {
@@ -59,113 +91,117 @@ function buildOrderMessage(order: OrderShape, orderUrl?: string) {
   return lines.join('\n');
 }
 
-// helper utils (keep in same file)
-function onlyDigits(s = '') {
-    return String(s).replace(/\D/g, '');
-  }
-  function isMobileDevice() {
-    if (typeof navigator === 'undefined') return false;
-    return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
-  }
-  
-  /**
-   * Opens WhatsApp with message.
-   * - Desktop/laptop: opens WhatsApp Web in NEW TAB addressed to phone (if provided)
-   * - Mobile: tries navigator.share, falls back to whatsapp deep link
-   *
-   * phone: string (any format) - function will strip non-digits; do NOT include '+'
-   */
-  export async function shareToWhatsApp(text, phone) {
-    const encoded = encodeURIComponent(text);
-    const digits = onlyDigits(phone || '');
-  
-    // Desktop: open WhatsApp Web (direct)
-    if (!isMobileDevice()) {
-      // If phone digits exist, open chat to that number. Otherwise open generic composer.
-      const waWebUrl = digits
-        ? `https://web.whatsapp.com/send?phone=${digits}&text=${encoded}`
-        : `https://web.whatsapp.com/send?text=${encoded}`;
-  
-      // Open in a new tab/window and avoid leaking window.opener
-      try {
-        window.open(waWebUrl, '_blank', 'noopener');
-      } catch (err) {
-        // fallback to api.whatsapp.com if window.open fails for some reason
-        const fallback = digits
-          ? `https://api.whatsapp.com/send?phone=${digits}&text=${encoded}`
-          : `https://api.whatsapp.com/send?text=${encoded}`;
-        window.open(fallback, '_blank', 'noopener');
-      }
-  
-      // copy to clipboard as convenience (best-effort)
-      if (navigator.clipboard) {
-        try {
-          await navigator.clipboard.writeText(text);
-        } catch (e) {
-          /* ignore copy errors */
-        }
-      }
-      return { platform: 'desktop', openedUrl: waWebUrl };
-    }
-  
-    // Mobile: Web Share API preferred
-    if (navigator.share) {
-      try {
-        await navigator.share({ title: 'Order', text });
-        return { platform: 'mobile', method: 'web-share' };
-      } catch (err) {
-        // user cancelled or not available — fall back to app deep link
-      }
-    }
-  
-    // Mobile fallback: whatsapp:// deep link
-    const waApp = digits
-      ? `whatsapp://send?phone=${digits}&text=${encoded}`
-      : `whatsapp://send?text=${encoded}`;
-  
-    // Redirect user to whatsapp app; on some Android devices this will open WhatsApp
+/* --- small helpers --- */
+function onlyDigits(s = ''): string {
+  return String(s).replace(/\D/g, '');
+}
+
+function isMobileDevice(): boolean {
+  if (typeof navigator === 'undefined' || typeof navigator.userAgent !== 'string') return false;
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+}
+
+type ShareResult =
+  | { platform: 'desktop'; openedUrl?: string }
+  | { platform: 'mobile'; method?: 'web-share' | 'deep-link' | 'fallback-api'; openedUrl?: string };
+
+/**
+ * Opens WhatsApp with message.
+ * - Desktop/laptop: opens WhatsApp Web in NEW TAB addressed to phone (if provided)
+ * - Mobile: tries navigator.share, falls back to whatsapp deep link
+ *
+ * phone: string (any format) - function will strip non-digits; do NOT include '+'
+ */
+export async function shareToWhatsApp(text: string, phone?: string): Promise<ShareResult | void> {
+  const encoded = encodeURIComponent(text);
+  const digits = onlyDigits(phone ?? '');
+
+  // Desktop: open WhatsApp Web (direct)
+  if (!isMobileDevice()) {
+    const waWebUrl = digits
+      ? `https://web.whatsapp.com/send?phone=${digits}&text=${encoded}`
+      : `https://web.whatsapp.com/send?text=${encoded}`;
+
     try {
-      window.location.href = waApp;
-      return { platform: 'mobile', method: 'deep-link', openedUrl: waApp };
-    } catch (err) {
-      // Last fallback: api.whatsapp.com (opens in browser)
+      // open in new tab and avoid leaking opener
+      window.open(waWebUrl, '_blank', 'noopener,noreferrer');
+    } catch {
       const fallback = digits
         ? `https://api.whatsapp.com/send?phone=${digits}&text=${encoded}`
         : `https://api.whatsapp.com/send?text=${encoded}`;
-      window.location.href = fallback;
-      return { platform: 'mobile', method: 'fallback-api', openedUrl: fallback };
+      try {
+        window.open(fallback, '_blank', 'noopener,noreferrer');
+      } catch {
+        // ignore
+      }
     }
-  }
-  
 
-/** Icon-only share button (compact) */
-export function ShareOrderIcon({
-  order,
-  orderUrl,
-  phone,
-  className = '',
-}: {
+    // best-effort copy to clipboard using a safe typed narrow
+    try {
+      const nav = navigator as Navigator & { clipboard?: { writeText(text: string): Promise<void> } };
+      if (nav.clipboard && typeof nav.clipboard.writeText === 'function') {
+        await nav.clipboard.writeText(text);
+      }
+    } catch {
+      /* ignore copy errors */
+    }
+
+    return { platform: 'desktop', openedUrl: waWebUrl };
+  }
+
+  // Mobile: Web Share API preferred
+  try {
+    const navShare = navigator as Navigator & { share?: (data: ShareData) => Promise<void> };
+    if (navShare.share && typeof navShare.share === 'function') {
+      await navShare.share({ title: 'Order', text });
+      return { platform: 'mobile', method: 'web-share' };
+    }
+  } catch {
+    // user cancelled or not available — fall through to deep link
+  }
+
+  // Mobile fallback: whatsapp:// deep link
+  const waApp = digits ? `whatsapp://send?phone=${digits}&text=${encoded}` : `whatsapp://send?text=${encoded}`;
+
+  try {
+    // attempt to open the app
+    window.location.href = waApp;
+    return { platform: 'mobile', method: 'deep-link', openedUrl: waApp };
+  } catch {
+    // Last fallback: api.whatsapp.com (opens in browser)
+    const fallback = digits
+      ? `https://api.whatsapp.com/send?phone=${digits}&text=${encoded}`
+      : `https://api.whatsapp.com/send?text=${encoded}`;
+    // set href as last resort
+    window.location.href = fallback;
+    return { platform: 'mobile', method: 'fallback-api', openedUrl: fallback };
+  }
+}
+
+/* --- Icon-only share button (compact) --- */
+type ShareIconProps = {
   order: OrderShape;
   orderUrl?: string;
   phone?: string;
   className?: string;
-}) {
-  const [loading, setLoading] = useState(false);
-  const [copied, setCopied] = useState(false);
+};
 
-  const handleShare = async () => {
+export function ShareOrderIcon({ order, orderUrl, phone, className = '' }: ShareIconProps): JSX.Element {
+  const [loading, setLoading] = useState<boolean>(false);
+  const [copied, setCopied] = useState<boolean>(false);
+
+  const handleShare = async (): Promise<void> => {
     setLoading(true);
     setCopied(false);
     try {
       const origin = typeof window !== 'undefined' ? window.location.origin : '';
       const url = orderUrl ?? (origin ? `${origin}/orders/${order?.id ?? ''}` : undefined);
       const text = buildOrderMessage(order, url);
-      if (!isMobileDevice()) {
-        await shareToWhatsApp(text, phone);
+      const res = await shareToWhatsApp(text, phone);
+      // On desktop we copied to clipboard inside shareToWhatsApp; show temporary feedback
+      if (!isMobileDevice() && res?.platform === 'desktop') {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
-      } else {
-        await shareToWhatsApp(text, phone);
       }
     } finally {
       setLoading(false);
@@ -197,30 +233,27 @@ export function ShareOrderIcon({
   );
 }
 
-/** Full button variant if you ever want it */
-export function ShareOrderButton({
-  order,
-  orderUrl,
-  phone,
-  className = '',
-}: {
+/* --- Full button variant --- */
+type ShareButtonProps = {
   order: OrderShape;
   orderUrl?: string;
   phone?: string;
   className?: string;
-}) {
-  const [loading, setLoading] = useState(false);
-  const [copied, setCopied] = useState(false);
+};
 
-  const onShare = async () => {
+export function ShareOrderButton({ order, orderUrl, phone, className = '' }: ShareButtonProps): JSX.Element {
+  const [loading, setLoading] = useState<boolean>(false);
+  const [copied, setCopied] = useState<boolean>(false);
+
+  const onShare = async (): Promise<void> => {
     setLoading(true);
     setCopied(false);
     try {
       const origin = typeof window !== 'undefined' ? window.location.origin : '';
       const url = orderUrl ?? (origin ? `${origin}/orders/${order?.id ?? ''}` : undefined);
       const text = buildOrderMessage(order, url);
-      await shareToWhatsApp(text, phone);
-      if (!isMobileDevice()) {
+      const res = await shareToWhatsApp(text, phone);
+      if (!isMobileDevice() && res?.platform === 'desktop') {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
       }

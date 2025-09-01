@@ -1,7 +1,6 @@
-// src/context/CartContext.tsx
 'use client';
 
-import React, { createContext, useContext, useEffect, useMemo, useState } from 'react';
+import React, { createContext, useContext, useEffect, useMemo, useState, useCallback, JSX } from 'react';
 import { useUser } from '@clerk/nextjs';
 
 export type CartItem = {
@@ -12,8 +11,9 @@ export type CartItem = {
   colors?: string[]; // available colors
   selectedColors?: string[]; // user-selected colors
   set?: number | string; // number of sets (string allowed while typing)
+  quantity?: number | string; // legacy compatibility (optional)
   price?: number | null; // optional
-  raw?: any;
+  raw?: unknown; // <-- unknown instead of any
   concept?: string | null;
   fabric?: string | null;
 };
@@ -35,7 +35,7 @@ const BASE_KEY = 'cart_v1';
 // legacy localStorage key (if you used plain 'cart')
 const LEGACY_LOCAL_KEY = 'cart';
 
-function isBrowser() {
+function isBrowser(): boolean {
   return typeof window !== 'undefined';
 }
 
@@ -48,21 +48,27 @@ function safeParse<T>(str: string | null): T | null {
   }
 }
 
-function storageKeyFor(userId?: string | null) {
+function storageKeyFor(userId?: string | null): string {
   if (userId) return `${BASE_KEY}:user:${String(userId)}`;
   return `${BASE_KEY}:anon`;
 }
 
-export function CartProvider({ children }: { children: React.ReactNode }) {
+/** small helpers */
+function safeNumber(v: unknown): number {
+  if (v === null || v === undefined) return 0;
+  const n = Number(v);
+  return Number.isNaN(n) ? 0 : n;
+}
+
+export function CartProvider({ children }: { children: React.ReactNode }): JSX.Element {
   const { isLoaded, isSignedIn, user } = useUser();
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
 
   // compute storage key (depends on clerk state)
-  const key = useMemo(() => storageKeyFor(isLoaded && isSignedIn ? user?.id : null), [
-    isLoaded,
-    isSignedIn,
-    user?.id,
-  ]);
+  const key = useMemo(
+    () => storageKeyFor(isLoaded && isSignedIn ? user?.id ?? null : null),
+    [isLoaded, isSignedIn, user?.id]
+  );
 
   // 1) One-time migration from legacy localStorage key into sessionStorage (best-effort)
   useEffect(() => {
@@ -76,8 +82,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
         if (!existing) {
           sessionStorage.setItem(key, JSON.stringify(parsed));
         }
-        // don't remove legacy automatically (safer), uncomment if you want to delete:
-        // window.localStorage.removeItem(LEGACY_LOCAL_KEY);
+        // don't remove legacy automatically (safer)
       }
     } catch (err) {
       console.warn('Cart: migration from localStorage failed', err);
@@ -95,62 +100,60 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
       const parsedCurrent = safeParse<CartItem[]>(currentRaw) ?? [];
 
       // If user is signed in, attempt to merge anon -> user (only once when sign-in happens).
-      // We'll identify anonKey and userKey and if they differ and anon has items, merge them.
       if (isLoaded && isSignedIn && user?.id) {
         const anonKey = storageKeyFor(null);
         const userKey = storageKeyFor(user.id);
 
-        // If anon and user key are same (shouldn't be) or no anon items, just load userKey
         const anonRaw = sessionStorage.getItem(anonKey);
         const anonItems = safeParse<CartItem[]>(anonRaw) ?? [];
 
-        // load user items (may be existing)
         const userRaw = sessionStorage.getItem(userKey);
         const userItems = safeParse<CartItem[]>(userRaw) ?? [];
 
-        // if anon has data and it's different, merge then persist to userKey
         if (anonItems.length > 0) {
-          // merge algorithm: for each anon item:
-          // - if item id exists in userItems: sum sets (numeric), union selectedColors
-          // - else push anon item into userItems
+          // merge algorithm: for each item id
           const mergedMap = new Map<string, CartItem>();
+
           const pushToMap = (it: CartItem) => {
             const id = String(it.id);
             const existing = mergedMap.get(id);
             if (!existing) {
+              // shallow clone to avoid shared references
               mergedMap.set(id, { ...it });
             } else {
-              // sum sets (convert to number)
-              const existingSets = Number(existing.set ?? existing.quantity ?? 0) || 0;
-              const incomingSets = Number(it.set ?? it.quantity ?? 0) || 0;
+              // sum sets / quantity (use safeNumber to handle strings)
+              const existingSets = safeNumber(existing.set ?? existing.quantity ?? 0);
+              const incomingSets = safeNumber(it.set ?? it.quantity ?? 0);
               const newSets = existingSets + incomingSets;
               existing.set = newSets;
+              existing.quantity = newSets;
 
               // union selectedColors
-              const a = Array.isArray(existing.selectedColors) ? existing.selectedColors : [];
-              const b = Array.isArray(it.selectedColors) ? it.selectedColors : [];
-              const union = Array.from(new Set([...a.map(String), ...b.map(String)])).filter(Boolean);
+              const a = Array.isArray(existing.selectedColors) ? existing.selectedColors.map(String) : [];
+              const b = Array.isArray(it.selectedColors) ? it.selectedColors.map(String) : [];
+              const union = Array.from(new Set([...a, ...b])).filter(Boolean);
               existing.selectedColors = union;
 
-              // prefer other fields from existing (name, image), but keep raw if missing
+              // prefer existing fields but fallback raw
               existing.raw = existing.raw ?? it.raw;
+              existing.name = existing.name || it.name;
+              existing.image = existing.image || it.image;
+              existing.image_url = existing.image_url || it.image_url;
             }
           };
 
-          // seed map with userItems first (we want to prefer them)
+          // seed map with userItems first (prefer them)
           for (const ui of userItems) pushToMap(ui);
           // then merge anonItems (they'll increment sets or add)
           for (const ai of anonItems) pushToMap(ai);
 
           const merged = Array.from(mergedMap.values());
           sessionStorage.setItem(userKey, JSON.stringify(merged));
-          // remove anon after merging
           try {
             sessionStorage.removeItem(anonKey);
           } catch {
             // ignore
           }
-          // load merged into local state
           setCartItems(merged);
           return;
         }
@@ -161,7 +164,7 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
           return;
         }
 
-        // nothing special, load current parsed (which might be parsedCurrent above)
+        // nothing special, load current parsed
         setCartItems(parsedCurrent);
         return;
       }
@@ -193,8 +196,8 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     }
   }, [cartItems, key]);
 
-  // API functions (same surface as before)
-  const addToCart = (item: CartItem) => {
+  // API functions (same surface as before) - wrapped in useCallback so identities are stable
+  const addToCart = useCallback((item: CartItem) => {
     setCartItems((prev) => {
       const exists = prev.find((p) => p.id === item.id);
       if (exists) {
@@ -205,7 +208,8 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
             new Set([...(p.selectedColors ?? []).map(String), ...(item.selectedColors ?? []).map(String)])
           ).filter(Boolean);
           const newSet = item.set ?? p.set ?? 1;
-          return { ...p, ...item, selectedColors: unionColors, set: newSet };
+          const newQuantity = safeNumber(item.set ?? item.quantity ?? p.set ?? p.quantity ?? newSet);
+          return { ...p, ...item, selectedColors: unionColors, set: newSet, quantity: newQuantity };
         });
       }
       return [
@@ -214,16 +218,17 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
           ...item,
           selectedColors: Array.isArray(item.selectedColors) ? item.selectedColors : [],
           set: item.set ?? 1,
+          quantity: item.quantity ?? (typeof item.set === 'number' ? item.set : safeNumber(item.set)),
         },
       ];
     });
-  };
+  }, []);
 
-  const removeFromCart = (id: string) => {
+  const removeFromCart = useCallback((id: string) => {
     setCartItems((prev) => prev.filter((p) => p.id !== id));
-  };
+  }, []);
 
-  const updateItem = (id: string, patch: Partial<CartItem>) => {
+  const updateItem = useCallback((id: string, patch: Partial<CartItem>) => {
     setCartItems((prev) =>
       prev.map((p) => {
         if (p.id !== id) return p;
@@ -232,9 +237,9 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
         return merged;
       })
     );
-  };
+  }, []);
 
-  const clearCart = () => {
+  const clearCart = useCallback(() => {
     setCartItems([]);
     if (!isBrowser()) return;
     try {
@@ -242,16 +247,17 @@ export function CartProvider({ children }: { children: React.ReactNode }) {
     } catch {
       /* ignore */
     }
-  };
+  }, [key]);
 
-  const getTotalSets = () =>
-    cartItems.reduce((s, it) => s + (Number(it.set === undefined || it.set === null ? 0 : it.set) || 0), 0);
+  const getTotalSets = useCallback(() => {
+    return cartItems.reduce((s, it) => s + safeNumber(it.set ?? it.quantity ?? 0), 0);
+  }, [cartItems]);
 
-  const getTotalItems = () => cartItems.length;
+  const getTotalItems = useCallback(() => cartItems.length, [cartItems]);
 
   const value = useMemo(
     () => ({ cartItems, addToCart, removeFromCart, updateItem, clearCart, getTotalSets, getTotalItems }),
-    [cartItems]
+    [cartItems, addToCart, removeFromCart, updateItem, clearCart, getTotalSets, getTotalItems]
   );
 
   return <CartContext.Provider value={value}>{children}</CartContext.Provider>;
