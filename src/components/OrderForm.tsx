@@ -1,6 +1,7 @@
 'use client';
 import React, { JSX, useEffect, useState } from 'react';
-import Select, { StylesConfig } from 'react-select';
+import CreatableSelect from 'react-select/creatable';
+import { StylesConfig } from 'react-select';
 import { FaTrash, FaPencilAlt } from 'react-icons/fa';
 
 /* --- Types --- */
@@ -16,6 +17,7 @@ type OptionType = {
   Broker?: string;
   Agent_Name?: string;
   agent_id?: string | number;
+  number?: string;
   [k: string]: unknown;
 };
 
@@ -48,12 +50,21 @@ export default function OrderForm({
   const [agents, setAgents] = useState<OptionType[]>([]);
   const [availableItems, setAvailableItems] = useState<ItemType[]>([]);
 
+  // loading flags for dropdowns
+  const [loadingCustomers, setLoadingCustomers] = useState<boolean>(true);
+  const [loadingAgents, setLoadingAgents] = useState<boolean>(true);
+  const [loadingItems, setLoadingItems] = useState<boolean>(true);
+
   // step1
   const [selectedCustomer, setSelectedCustomer] = useState<OptionType | null>(null);
   const [customerEmail, setCustomerEmail] = useState<string>('');
   const [customerPhone, setCustomerPhone] = useState<string>('');
   const [selectedAgent, setSelectedAgent] = useState<OptionType | null>(null);
   const [agentPhone, setAgentPhone] = useState<string>('');
+
+  // order confirmation toggle (iPhone style)
+  // kept at top-level of the form so it's preserved between steps
+  const [isConfirmed, setIsConfirmed] = useState<boolean>(true);
 
   // step2
   const [orderItems, setOrderItems] = useState<OrderRow[]>([]);
@@ -89,81 +100,175 @@ export default function OrderForm({
     placeholder: (provided) => ({ ...provided, color: '#9ca3af' }),
   };
 
+  /* -------------------------
+     Helpers: normalize, merge, FS create
+     ------------------------- */
+  function normKey(s: unknown) {
+    return String(s ?? '').trim().toLowerCase();
+  }
+
+  // Merge arrays by Company_Name / value / label (prefer existing non-empty fields)
+  function mergeOptions(primary: OptionType[], secondary: OptionType[]) {
+    const map = new Map<string, OptionType>();
+    const put = (o: OptionType) => {
+      const key = normKey((o as any).Company_Name ?? o.value ?? o.label);
+      if (!key) return;
+      const prev = map.get(key);
+      if (!prev) {
+        map.set(key, { ...o });
+      } else {
+        // shallow merge: keep fields from prev if present, else take from o
+        map.set(key, {
+          ...prev,
+          ...Object.fromEntries(
+            Object.entries(o).filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+          ),
+        });
+      }
+    };
+    primary.forEach(put);
+    secondary.forEach(put);
+    return Array.from(map.values());
+  }
+
+  // POST helper to server route that uses firebase-admin
+  async function createFsDoc(
+    collection: 'customers' | 'agents' | 'items',
+    body: Record<string, unknown>
+  ): Promise<{ id: string }> {
+    const res = await fetch(`/api/fs/${collection}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok || !json?.id) {
+      throw new Error((json as any).error ?? `Failed to create ${collection}`);
+    }
+    return { id: (json as any).id as string };
+  }
+
+  function findExistingOption(list: OptionType[], name: string): OptionType | undefined {
+    const key = normKey(name);
+    return list.find((o) => {
+      const candidate = normKey((o as any).Company_Name ?? o.label ?? o.value);
+      return candidate === key;
+    });
+  }
+
+  /* -------------------------
+     Fetch & merge BQ + Firestore
+     ------------------------- */
   useEffect(() => {
     async function fetchData(): Promise<void> {
+      setLoadingCustomers(true);
+      setLoadingAgents(true);
+      setLoadingItems(true);
+      setError('');
       try {
-        const [customersRes, agentsRes, itemsRes] = await Promise.all([
+        const [customersRes, agentsRes, itemsRes, fsCustomersRes, fsAgentsRes, fsItemsRes] = await Promise.all([
           fetch('/api/customers'),
           fetch('/api/agents'),
           fetch('/api/items'),
+          fetch('/api/fs/customers'),
+          fetch('/api/fs/agents'),
+          fetch('/api/fs/items'),
         ]);
 
-        const customersData = customersRes.ok ? await customersRes.json().catch(() => ({ rows: [] })) : { rows: [] };
-        const agentsData = agentsRes.ok ? await agentsRes.json().catch(() => ({ rows: [] })) : { rows: [] };
-        const itemsData = itemsRes.ok ? await itemsRes.json().catch(() => ({ rows: [] })) : { rows: [] };
+        const customersBQ = (customersRes.ok ? await customersRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
+        const agentsBQ = (agentsRes.ok ? await agentsRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
+        const itemsBQ = (itemsRes.ok ? await itemsRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
 
-        if (customersData && Array.isArray((customersData as { rows?: unknown }).rows)) {
-          const rows = (customersData as { rows: unknown[] }).rows;
-          const mapped = rows.map((cRaw) => {
-            const c = (cRaw as Record<string, unknown>) || {};
-            const company = (c.Company_Name ?? c.company_name ?? '') as string;
-            const city = (c.City ?? '') as string;
-            return {
-              ...(c as Record<string, unknown>),
-              value: (c.Company_Name ?? c.company_name ?? String(c.id ?? '')) as string,
-              label: `${company || 'Unknown'}${city ? ` [${city}]` : ''}`,
-            } as OptionType;
-          });
-          setCustomers(mapped);
+        const customersFS = (fsCustomersRes.ok ? await fsCustomersRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
+        const agentsFS = (fsAgentsRes.ok ? await fsAgentsRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
+        const itemsFS = (fsItemsRes.ok ? await fsItemsRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
+
+        // mappers
+        const mapCustomer = (cRaw: any): OptionType => {
+          const c = cRaw ?? {};
+          const company = c.Company_Name ?? c.company_name ?? '';
+          const city = c.City ?? '';
+          return {
+            ...c,
+            value: (company || String(c.id ?? '')),
+            label: `${company || 'Unknown'}${city ? ` [${city}]` : ''}`,
+            Company_Name: company,
+            Email: c.Email ?? c.email ?? '',
+            Number: c.Number ?? c.phone ?? '',
+            Broker: c.Broker ?? '',
+            Agent_Name: c.Agent_Name ?? '',
+            id: c.id ?? c._id ?? c.id,
+          } as OptionType;
+        };
+
+        const mapAgent = (aRaw: any): OptionType => {
+          const a = aRaw ?? {};
+          const name = a.Company_Name ?? a.name ?? '';
+          return {
+            ...a,
+            value: (name || String(a.id ?? '')),
+            label: name || String(a.id ?? ''),
+            Company_Name: name,
+            number: a.Number ?? a.phone ?? a.Contact_Number ?? a.contact_number ?? '',
+            id: a.id ?? a._id ?? a.id,
+          } as OptionType;
+        };
+
+        const mapItem = (iRaw: any): ItemType => {
+          const i = iRaw ?? {};
+          let colors: string[] = [];
+          if (Array.isArray(i.Colors)) colors = (i.Colors as unknown[]).map(String);
+          else if (Array.isArray(i.colors)) colors = (i.colors as unknown[]).map(String);
+          else if (i.colors_string) colors = String(i.colors_string).split(',').map((s: string) => s.trim()).filter(Boolean);
+          else if (i.Color) colors = [String(i.Color).trim()];
+
+          colors = Array.from(new Set(colors.map((c) => String(c || '').trim()).filter(Boolean)));
+
+          const label = i.Item ?? i.sku ?? String(i.id ?? '');
+          return {
+            ...i,
+            value: label,
+            label,
+            colors,
+            id: i.id ?? i._id ?? i.id,
+          } as ItemType;
+        };
+
+        // Build mapped arrays
+        const mappedCustomersBQ = customersBQ.map(mapCustomer);
+        const mappedCustomersFS = customersFS.map(mapCustomer);
+        const mergedCustomers = mergeOptions(mappedCustomersBQ, mappedCustomersFS);
+
+        const mappedAgentsBQ = agentsBQ.map(mapAgent);
+        const mappedAgentsFS = agentsFS.map(mapAgent);
+        const mergedAgents = mergeOptions(mappedAgentsBQ, mappedAgentsFS);
+
+        const mappedItems = [...(itemsBQ.map(mapItem)), ...(itemsFS.map(mapItem))];
+        // dedupe items by value
+        const itemMap = new Map<string, ItemType>();
+        for (const it of mappedItems) {
+          itemMap.set(normKey(it.value), it);
         }
+        const mergedItems = Array.from(itemMap.values());
 
-        if (agentsData && Array.isArray((agentsData as { rows?: unknown }).rows)) {
-          const rows = (agentsData as { rows: unknown[] }).rows;
-          const mapped = rows.map((aRaw) => {
-            const a = (aRaw as Record<string, unknown>) || {};
-            return {
-              ...(a as Record<string, unknown>),
-              value: (a.Company_Name ?? a.name ?? String(a.id ?? '')) as string,
-              label: (a.Company_Name ?? a.name ?? String(a.id ?? '')) as string,
-              number: (a.Number ?? a.phone ?? a.Contact_Number ?? a.contact_number ?? '') as string,
-            } as OptionType;
-          });
-          setAgents(mapped);
-        }
-
-        if (itemsData && Array.isArray((itemsData as { rows?: unknown }).rows)) {
-          const rows = (itemsData as { rows: unknown[] }).rows;
-          const normalized = rows.map((iRaw) => {
-            const i = (iRaw as Record<string, unknown>) || {};
-            // collect colors in multiple legacy shapes
-            let colors: string[] = [];
-            if (Array.isArray(i.Colors)) colors = (i.Colors as unknown[]).map(String);
-            else if (Array.isArray(i.colors)) colors = (i.colors as unknown[]).map(String);
-            else if (i.colors_string) {
-              colors = String(i.colors_string).split(',').map((s) => s.trim()).filter(Boolean);
-            } else if (i.Color) colors = [String(i.Color).trim()];
-
-            colors = Array.from(new Set(colors.map((c) => String(c || '').trim()).filter((c) => c && c.toLowerCase() !== 'nan')));
-
-            return {
-              ...(i as Record<string, unknown>),
-              value: (i.Item ?? i.sku ?? String(i.id ?? '')) as string,
-              label: (i.Item ?? i.sku ?? String(i.id ?? '')) as string,
-              colors,
-            } as ItemType;
-          });
-          setAvailableItems(normalized);
-        }
+        setCustomers(mergedCustomers);
+        setAgents(mergedAgents);
+        setAvailableItems(mergedItems);
       } catch (errUnknown) {
-        // runtime-safe logging
         console.error('fetchData error', errUnknown);
         setError('Failed to load necessary data.');
+      } finally {
+        setLoadingCustomers(false);
+        setLoadingAgents(false);
+        setLoadingItems(false);
       }
     }
     void fetchData();
   }, []);
 
-  // Autofill agent if customer's Broker/Agent_Name matches an agent
+  /* -------------------------
+     Autofill agent when customer chosen
+     ------------------------- */
   useEffect(() => {
     if (!selectedCustomer) {
       setSelectedAgent(null);
@@ -174,8 +279,8 @@ export default function OrderForm({
     }
 
     const sc = selectedCustomer as Record<string, unknown>;
-    setCustomerEmail((sc.Email as string) ?? (sc.email as string) ?? '');
-    setCustomerPhone((sc.Number as string) ?? (sc.phone as string) ?? '');
+    setCustomerEmail(((sc.Email as string) ?? (sc.email as string) ?? '') as string);
+    setCustomerPhone(((sc.Number as string) ?? (sc.phone as string) ?? '') as string);
 
     const brokerName = String(sc.Broker ?? sc.Agent_Name ?? sc.broker ?? '').trim();
     if (brokerName) {
@@ -185,23 +290,113 @@ export default function OrderForm({
       });
       if (found) {
         setSelectedAgent(found);
-        setAgentPhone((found.number as string) ?? (found.phone as string) ?? (found.Contact_Number as string) ?? '');
+        setAgentPhone(((found.number as string) ?? (found.phone as string) ?? (found.Contact_Number as string) ?? '') as string);
         return;
       }
     }
 
     const agentById = agents.find(
-      (a) => String(a.id ?? a.agent_id ?? '').toLowerCase() === String(sc.agent_id ?? sc.Agent_ID ?? '').toLowerCase()
+      (a) => String(a.id ?? a.agent_id ?? '').toLowerCase() === String((sc.agent_id ?? sc.Agent_ID ?? '') as string).toLowerCase()
     );
     if (agentById) {
       setSelectedAgent(agentById);
-      setAgentPhone((agentById.number as string) ?? (agentById.phone as string) ?? '');
+      setAgentPhone(((agentById.number as string) ?? (agentById.phone as string) ?? '') as string);
       return;
     }
 
     setSelectedAgent(null);
     setAgentPhone('');
   }, [selectedCustomer, agents]);
+
+  /* -------------------------
+     Creatable: create handlers (optimistic + POST)
+     - Saves customer email & phone (when creating customer)
+     - Saves agent phone (when creating agent)
+     ------------------------- */
+  async function handleCreateCustomer(input: string): Promise<void> {
+    const name = input.trim();
+    if (!name) return;
+    // duplicate guard
+    const existing = findExistingOption(customers, name);
+    if (existing) {
+      setSelectedCustomer(existing);
+      // if existing has contact info, populate inputs
+      setCustomerEmail((existing.Email as string) ?? (existing.email as string) ?? '');
+      setCustomerPhone((existing.Number as string) ?? (existing.phone as string) ?? '');
+      return;
+    }
+
+    // include current email/phone values (may be blank)
+    const optimistic: OptionType = { value: name, label: name, Company_Name: name, Email: customerEmail, Number: customerPhone };
+    setCustomers((prev) => [optimistic, ...prev]);
+    setSelectedCustomer(optimistic);
+
+    try {
+      // include email/number in saved doc
+      const payload = { Company_Name: name, Email: customerEmail ?? '', Number: customerPhone ?? '' };
+      const { id } = await createFsDoc('customers', payload);
+      setCustomers((prev) => prev.map((c) => (c === optimistic ? { ...c, id } : c)));
+    } catch (errUnknown) {
+      console.error('create customer error', errUnknown);
+      setError('Could not save new customer.');
+      setCustomers((prev) => prev.filter((c) => c !== optimistic));
+      setSelectedCustomer(null);
+    }
+  }
+
+  async function handleCreateAgent(input: string): Promise<void> {
+    const name = input.trim();
+    if (!name) return;
+    const existing = findExistingOption(agents, name);
+    if (existing) {
+      setSelectedAgent(existing);
+      setAgentPhone((existing as any).number ?? (existing as any).phone ?? '');
+      return;
+    }
+
+    const optimistic: OptionType = { value: name, label: name, Company_Name: name, number: agentPhone ?? '' };
+    setAgents((prev) => [optimistic, ...prev]);
+    setSelectedAgent(optimistic);
+
+    try {
+      // include phone in saved doc
+      const payload = { Company_Name: name, Number: agentPhone ?? '' };
+      const { id } = await createFsDoc('agents', payload);
+      setAgents((prev) => prev.map((a) => (a === optimistic ? { ...a, id } : a)));
+    } catch (errUnknown) {
+      console.error('create agent error', errUnknown);
+      setError('Could not save new agent.');
+      setAgents((prev) => prev.filter((a) => a !== optimistic));
+      setSelectedAgent(null);
+    }
+  }
+
+  async function handleCreateItem(input: string): Promise<void> {
+    const name = input.trim();
+    if (!name) return;
+    const key = normKey(name);
+    const existing = availableItems.find((it) => normKey(it.value) === key || normKey(it.label) === key);
+    if (existing) {
+      setCurrentItem(existing);
+      setAvailableColors(existing.colors ? (existing.colors as string[]).map(String) : []);
+      return;
+    }
+
+    const optimistic: ItemType = { value: name, label: name, colors: [] };
+    setAvailableItems((prev) => [optimistic, ...prev]);
+    setCurrentItem(optimistic);
+    setAvailableColors([]);
+
+    try {
+      const { id } = await createFsDoc('items', { Item: name, Colors: [] });
+      setAvailableItems((prev) => prev.map((i) => (i === optimistic ? { ...i, id } : i)));
+    } catch (errUnknown) {
+      console.error('create item error', errUnknown);
+      setError('Could not save new item.');
+      setAvailableItems((prev) => prev.filter((i) => i !== optimistic));
+      setCurrentItem(null);
+    }
+  }
 
   /* --- handlers with typed params --- */
   const handleCustomerChange = (opt: OptionType | null): void => {
@@ -212,7 +407,7 @@ export default function OrderForm({
 
   const handleAgentChange = (opt: OptionType | null): void => {
     setSelectedAgent(opt);
-    setAgentPhone((opt as Record<string, unknown>)?.number as string ?? (opt as Record<string, unknown>)?.phone as string ?? '');
+    setAgentPhone(((opt as Record<string, unknown>)?.number as string) ?? ((opt as Record<string, unknown>)?.phone as string) ?? '');
     setStep1Error('');
   };
 
@@ -235,10 +430,23 @@ export default function OrderForm({
     setItemError('');
   };
 
-  // Validation conditions: at least 3 colors, qty > 0
+  // Determine minimum colors required for the selected item:
+  // - if availableColors >= 3 => require 3
+  // - if availableColors 1 or 2 => require 1
+  // - if availableColors === 0 => require 0 (allow adding without color)
+  const minColorsRequired = (): number => {
+    if (availableColors.length >= 3) return 3;
+    if (availableColors.length >= 1) return 1;
+    return 0;
+  };
+
+  // Validation conditions adjusted to allow items with <3 colors
   const canAddOrUpdate = (): boolean => {
     const qtyNum = Number(currentQty);
-    return !!currentItem && Array.isArray(selectedColors) && selectedColors.length >= 3 && !Number.isNaN(qtyNum) && qtyNum > 0;
+    const minReq = minColorsRequired();
+    const selectedCount = Array.isArray(selectedColors) ? selectedColors.length : 0;
+    // selectedCount must be >= minReq
+    return !!currentItem && selectedCount >= minReq && !Number.isNaN(qtyNum) && qtyNum > 0;
   };
 
   const handleAddOrUpdateItem = (): void => {
@@ -252,26 +460,43 @@ export default function OrderForm({
       setItemError('Quantity must be a number greater than 0.');
       return;
     }
-    if (!selectedColors || selectedColors.length < 3) {
-      setItemError('Please select at least 3 colors before adding.');
+
+    const minReq = minColorsRequired();
+    const selCount = selectedColors.length;
+
+    if (minReq > 0 && selCount < minReq) {
+      setItemError(`Please select at least ${minReq} color${minReq > 1 ? 's' : ''} before adding.`);
       return;
     }
 
-    if (editingIndex !== null && editingIndex >= 0 && editingIndex < orderItems.length) {
-      const updated = [...orderItems];
-      updated[editingIndex] = {
-        item: currentItem,
-        color: selectedColors[0],
-        quantity: qty,
-      };
-      setOrderItems(updated);
-      setEditingIndex(null);
-    } else {
-      const newEntries = selectedColors.map((col) => ({
+    // Build entries:
+    // - If selectedColors has items, create one row per selected color (existing behavior)
+    // - If selectedColors is empty (minReq === 0), create a single row with color = ""
+    let newEntries: OrderRow[] = [];
+    if (selCount > 0) {
+      newEntries = selectedColors.map((col) => ({
         item: currentItem,
         color: col,
         quantity: qty,
       }));
+    } else {
+      // no colors available / selected -> create single row with empty color
+      newEntries = [
+        {
+          item: currentItem,
+          color: '',
+          quantity: qty,
+        },
+      ];
+    }
+
+    if (editingIndex !== null && editingIndex >= 0 && editingIndex < orderItems.length) {
+      // If editing, replace that single row with the first new entry (editing expects 1 row)
+      const updated = [...orderItems];
+      updated[editingIndex] = newEntries[0];
+      setOrderItems(updated);
+      setEditingIndex(null);
+    } else {
       setOrderItems((prev) => [...prev, ...newEntries]);
     }
 
@@ -288,7 +513,7 @@ export default function OrderForm({
     setEditingIndex(index);
     setCurrentItem(row.item ?? null);
     setAvailableColors(row.item?.colors ? (row.item.colors as unknown[]).map(String) : []);
-    setSelectedColors([row.color]);
+    setSelectedColors(row.color ? [row.color] : []);
     setCurrentQty(String(row.quantity ?? ''));
     setStep(2);
   };
@@ -353,6 +578,8 @@ export default function OrderForm({
           color: it.color,
           quantity: parseInt(String(it.quantity), 10),
         })),
+        // Order status (saved to DB as string)
+        orderStatus: isConfirmed ? 'Confirmed' : 'Unconfirmed',
       };
 
       const res = await fetch('/api/orders', {
@@ -381,6 +608,9 @@ export default function OrderForm({
     }
   };
 
+  /* -------------------------
+     Render
+     ------------------------- */
   return (
     <form onSubmit={handleSubmit} className="bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-3xl mx-auto">
       <h2 className="text-2xl font-bold text-white mb-6">Create Order</h2>
@@ -391,14 +621,17 @@ export default function OrderForm({
         <div>
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Customer</label>
-            <Select
+            <CreatableSelect
               styles={customStyles}
               options={customers}
               value={selectedCustomer}
               onChange={(opt) => handleCustomerChange(opt as OptionType | null)}
+              onCreateOption={(input) => { void handleCreateCustomer(input); }}
               isClearable
               isSearchable
-              placeholder="Select customer..."
+              isLoading={loadingCustomers}
+              isDisabled={loadingCustomers}
+              placeholder={loadingCustomers ? 'Loading customers...' : 'Select or type to add customer...'}
             />
           </div>
 
@@ -415,20 +648,23 @@ export default function OrderForm({
 
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Agent</label>
-            <Select
+            <CreatableSelect
               styles={customStyles}
               options={agents}
               value={selectedAgent}
               onChange={(opt) => handleAgentChange(opt as OptionType | null)}
+              onCreateOption={(input) => { void handleCreateAgent(input); }}
               isClearable
               isSearchable
-              placeholder="Select agent..."
+              isLoading={loadingAgents}
+              isDisabled={loadingAgents}
+              placeholder={loadingAgents ? 'Loading agents...' : 'Select or type to add agent...'}
             />
           </div>
 
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Agent Phone</label>
-            <input value={agentPhone} readOnly className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3" />
+            <input value={agentPhone} onChange={(e) => setAgentPhone(e.target.value)} className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3" />
           </div>
 
           {step1Error && <div className="text-red-400 mb-4">{step1Error}</div>}
@@ -453,14 +689,17 @@ export default function OrderForm({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">Item</label>
-              <Select
-                styles={customStyles}
+              <CreatableSelect
+                styles={customStyles as any}
                 options={availableItems}
                 value={currentItem}
                 onChange={(opt) => handleItemChange(opt as ItemType | null)}
-                placeholder="Select item..."
+                onCreateOption={(input) => { void handleCreateItem(input); }}
+                placeholder={loadingItems ? 'Loading items...' : 'Select item...'}
                 isClearable
                 isSearchable
+                isLoading={loadingItems}
+                isDisabled={loadingItems}
               />
             </div>
 
@@ -501,7 +740,13 @@ export default function OrderForm({
             </div>
 
             <div className="mt-2 text-xs text-gray-400">
-              <span>Minimum 3 colors required.</span>
+              <span>
+                {availableColors.length >= 3
+                  ? 'Minimum 3 colors required.'
+                  : availableColors.length >= 1
+                    ? 'Select at least 1 color.'
+                    : 'No colors available — you may add the item without selecting colors.'}
+              </span>
             </div>
 
             {itemError && <div className="text-red-400 mt-2">{itemError}</div>}
@@ -536,7 +781,7 @@ export default function OrderForm({
                 {orderItems.map((it, idx) => (
                   <tr key={idx} className="bg-gray-800">
                     <td className="px-4 py-3 text-sm text-gray-100">{it.item?.label ?? it.item?.Item ?? it.item?.value}</td>
-                    <td className="px-4 py-3 text-sm text-gray-200">{it.color}</td>
+                    <td className="px-4 py-3 text-sm text-gray-200">{it.color || '—'}</td>
                     <td className="px-4 py-3 text-sm text-gray-200 text-right">{it.quantity}</td>
                     <td className="px-4 py-3 text-sm text-gray-200 text-center">
                       <div className="inline-flex items-center gap-2">
@@ -575,6 +820,33 @@ export default function OrderForm({
                 )}
               </tbody>
             </table>
+          </div>
+
+          {/* Show current Order Status right above the Create Order button */}
+          <div className="mb-4 flex items-center justify-between">
+            <div className="flex items-center gap-4">
+              <div>
+                <div className="text-sm text-gray-300 font-medium">Order Status</div>
+                <div className="text-xs text-gray-400">{isConfirmed ? 'Confirmed' : 'Unconfirmed'}</div>
+              </div>
+
+              {/* iPhone-style toggle for Confirmed / Unconfirmed (moved here) */}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isConfirmed}
+                onClick={() => setIsConfirmed((s) => !s)}
+                className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors focus:outline-none ${isConfirmed ? 'bg-green-500' : 'bg-gray-600'}`}
+              >
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${isConfirmed ? 'translate-x-7' : 'translate-x-1'}`}
+                />
+              </button>
+            </div>
+
+            <div className="text-sm text-gray-400">
+              (This will be saved to the database as a string)
+            </div>
           </div>
 
           <div className="flex justify-between mt-6">

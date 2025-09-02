@@ -1,21 +1,73 @@
-import { getBQClient } from "@/server/bq-handler";
+// app/api/customers/route.ts
+import { NextResponse } from 'next/server';
+import { BigQuery, type Query as BQQuery } from '@google-cloud/bigquery';
 
-export async function GET(): Promise<Response> {
+export const runtime = 'nodejs';
+
+type Nil<T> = T | null | undefined;
+
+export interface CustomerWithAgentRow {
+  Company_Name: string;
+  Cust_Ved_Type?: Nil<string>;
+  Area?: Nil<string>;
+  City?: Nil<string>;
+  State?: Nil<string>;
+  Outstanding?: Nil<number>;
+  Type?: Nil<string>;
+  Broker?: Nil<string>;
+  Contact_Name?: Nil<string>;
+  Number?: Nil<string>;
+  Created_Date?: Nil<string>;
+  Agent_Name?: Nil<string>;
+  Agent_Number?: Nil<string>;
+}
+
+interface ApiSuccess { rows: CustomerWithAgentRow[] }
+interface ApiError { error: string }
+
+function makeBQ(): BigQuery {
+  const key = process.env.GCLOUD_SERVICE_KEY;
+  if (key) {
+    const creds = JSON.parse(key);
+    return new BigQuery({ projectId: process.env.BQ_PROJECT || creds.project_id, credentials: creds });
+  }
+  return new BigQuery({ projectId: process.env.BQ_PROJECT });
+}
+
+const bq = makeBQ();
+
+export async function GET() {
   try {
-    const bq = getBQClient();
-    const dataset = process.env.BQ_DATASET;
+    const project   = process.env.BQ_PROJECT!;
+    const dataset   = process.env.BQ_DATASET!;
+    const customers = process.env.BQ_CUSTOMERS_TABLE ?? 'kolkata_customer';
+    const brokers   = process.env.BQ_TABLE_AGENTS   ?? 'kolkata_broker';
 
-    if (!dataset) {
-      return new Response(JSON.stringify({ error: 'Missing BQ_DATASET env var' }), { status: 400 });
+    if (!project || !dataset) {
+      return NextResponse.json<ApiError>({ error: 'Missing BQ_PROJECT/BQ_DATASET' }, { status: 500 });
     }
 
-    const query = `SELECT * FROM \`${process.env.BQ_PROJECT}.${dataset}\`.kolkata_broker`;
-    const [job] = await bq.createQueryJob({ query });
-    const [rows] = await job.getQueryResults();
-    return new Response(JSON.stringify({ rows }), { status: 200 });
+    const detailsDataset = process.env.BQ_DETAILS_DATASET || 'frono';
+
+    const brokersTable = `\`${process.env.BQ_PROJECT}.${dataset}.kolkata_broker\``;
+
+    const sql = `
+        SELECT
+          *
+        FROM ${brokersTable}
+    `;
+
+    // ✅ Use the correct type for createQueryJob
+    const options: BQQuery = { query: sql, useLegacySql: false };
+
+    const [job] = await bq.createQueryJob(options);
+    const [rows] = (await job.getQueryResults()) as [CustomerWithAgentRow[]];
+
+    return NextResponse.json<ApiSuccess>({ rows }, { status: 200 });
   } catch (err: unknown) {
-    // Narrow unknown -> extract a safe message
-    const message = err instanceof Error ? err.message : String(err);
-    return new Response(JSON.stringify({ error: message }), { status: 500 });
+    const anyErr = err as { errors?: { message?: string }[]; message?: string };
+    const msg = anyErr?.errors?.[0]?.message || anyErr?.message || 'BigQuery query failed';
+    console.error('BQ customers join error:', err);
+    return NextResponse.json<ApiError>({ error: msg }, { status: 500 });
   }
 }

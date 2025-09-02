@@ -13,6 +13,7 @@
     "@clerk/themes": "^2.4.15",
     "@google-cloud/bigquery": "^8.1.1",
     "@radix-ui/react-slot": "^1.2.3",
+    "@types/react-select": "^5.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "firebase": "^12.2.1",

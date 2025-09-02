@@ -1,7 +1,7 @@
 'use client';
 
 import React, { JSX, useCallback, useEffect, useMemo, useState } from 'react';
-import { FaTimes } from 'react-icons/fa';
+import { FaTimes, FaTrash, FaUndo } from 'react-icons/fa';
 import Modal from '../../../components/Modal';
 import OrderForm from '../../../components/OrderForm';
 import OrderDetails from '../../../components/OrderDetails';
@@ -40,6 +40,7 @@ type NormalizedOrder = {
   items?: unknown[];
   totalQty: number;
   raw?: unknown;
+  orderStatus?: string; // normalized status (e.g. Confirmed / Unconfirmed / Cancelled)
 };
 
 function normalizeOrderShape(raw: unknown): NormalizedOrder {
@@ -128,6 +129,10 @@ function normalizeOrderShape(raw: unknown): NormalizedOrder {
     }
   }
 
+  // normalize order status (support multiple possible field names)
+  const rawStatus = (r.orderStatus ?? r.status ?? r.OrderStatus ?? '') as unknown;
+  const orderStatus = rawStatus ? String(rawStatus).trim() : '';
+
   return {
     id,
     customerName,
@@ -137,7 +142,8 @@ function normalizeOrderShape(raw: unknown): NormalizedOrder {
     createdAt,
     items,
     totalQty,
-    raw,
+    raw: r,
+    orderStatus: orderStatus || undefined,
   };
 }
 
@@ -150,6 +156,8 @@ export default function OrdersPage(): JSX.Element {
   const [isDetailsModalOpen, setIsDetailsModalOpen] = useState<boolean>(false);
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string>('');
+  const [actionId, setActionId] = useState<string | null>(null); // id currently being updated (cancel/restore)
+  const [selectedTab, setSelectedTab] = useState<'active' | 'cancelled' | 'all'>('active');
 
   const fetchOrders = useCallback(async (): Promise<void> => {
     setIsLoading(true);
@@ -220,8 +228,8 @@ export default function OrdersPage(): JSX.Element {
   };
 
   const filteredOrders = useMemo(() => {
-    if (!searchPills || searchPills.length === 0) return orders;
-    return orders.filter((order) =>
+    // apply search pills first
+    let result = orders.filter((order) =>
       searchPills.every((pill) => {
         const { field, value } = pill;
         const v = String(value || '').toLowerCase();
@@ -240,7 +248,64 @@ export default function OrdersPage(): JSX.Element {
         }
       })
     );
-  }, [orders, searchPills]);
+
+    // then apply tab filter
+    if (selectedTab === 'active') {
+      result = result.filter((o) => {
+        const s = (o.orderStatus ?? '').toLowerCase();
+        return s !== 'cancelled' && s !== 'cancel'; // treat both variants as cancelled
+      });
+    } else if (selectedTab === 'cancelled') {
+      result = result.filter((o) => {
+        const s = (o.orderStatus ?? '').toLowerCase();
+        return s === 'cancelled' || s === 'cancel';
+      });
+    }
+    return result;
+  }, [orders, searchPills, selectedTab]);
+
+  // mark order status via PATCH call
+  const markOrderStatus = async (id: string, newStatus: string): Promise<void> => {
+    if (!id) return;
+    const friendly = String(newStatus);
+    // confirm if cancelling (for safety)
+    if (friendly.toLowerCase() === 'cancelled' || friendly.toLowerCase() === 'cancel') {
+      const ok = window.confirm('Are you sure you want to mark this order as Cancelled?');
+      if (!ok) return;
+    }
+    try {
+      setActionId(id);
+      const res = await fetch(`/api/orders?id=${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orderStatus: friendly }),
+      });
+      if (!res.ok) {
+        const contentType = res.headers.get('content-type') ?? '';
+        let msg = `Failed to update order (${res.status})`;
+        if (contentType.includes('application/json')) {
+          const json = await res.json().catch(() => ({}));
+          msg = (json as Record<string, unknown>).message as string ?? msg;
+        } else {
+          const txt = await res.text().catch(() => '');
+          if (txt) msg = txt;
+        }
+        throw new Error(msg);
+      }
+      // refresh orders to show updated status (server is source of truth)
+      await fetchOrders();
+      // if details modal open for this order, close it to avoid stale view
+      if (selectedOrderId === id) {
+        handleDetailsClose();
+      }
+    } catch (err: unknown) {
+      console.error('Failed to mark order status:', err);
+      const message = err instanceof Error ? err.message : String(err);
+      setFetchError(`Failed to mark order: ${message}`);
+    } finally {
+      setActionId(null);
+    }
+  };
 
   return (
     <div className="w-full max-w-6xl mx-auto px-4">
@@ -264,7 +329,7 @@ export default function OrdersPage(): JSX.Element {
       <div className="mb-4">
         <input
           type="text"
-          placeholder="Search: use &quot;customer: name&quot;, &quot;agent: name&quot;, &quot;id: &lt;id&gt;&quot; or press Enter for quick customer search"
+          placeholder='Search: use "customer: name", "agent: name", "id: <id>" or press Enter for quick customer search'
           value={searchQuery}
           onChange={handleSearchChange}
           onKeyDown={handleSearchKeyDown}
@@ -277,7 +342,7 @@ export default function OrdersPage(): JSX.Element {
               className="bg-gray-700 text-gray-300 rounded-full px-3 py-1 text-sm font-semibold mr-2 mb-2 flex items-center"
             >
               <span>
-                {pill.field}: &quot;{pill.value}&quot;
+                {pill.field}: "{pill.value}"
               </span>
               <button
                 onClick={(ev) => {
@@ -296,6 +361,31 @@ export default function OrdersPage(): JSX.Element {
       </div>
 
       {fetchError && <div className="text-red-400 mb-4">{fetchError}</div>}
+
+      {/* Tabs: Active / Cancelled / All */}
+      <div className="flex items-center gap-2 mb-6">
+        <button
+          onClick={() => setSelectedTab('active')}
+          className={`px-3 py-1 rounded ${selectedTab === 'active' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300'}`}
+          type="button"
+        >
+          Active ({orders.filter((o) => !((o.orderStatus ?? '').toLowerCase().includes('cancel'))).length})
+        </button>
+        <button
+          onClick={() => setSelectedTab('cancelled')}
+          className={`px-3 py-1 rounded ${selectedTab === 'cancelled' ? 'bg-red-600 text-white' : 'bg-gray-700 text-gray-300'}`}
+          type="button"
+        >
+          Cancelled ({orders.filter((o) => ((o.orderStatus ?? '').toLowerCase().includes('cancel'))).length})
+        </button>
+        <button
+          onClick={() => setSelectedTab('all')}
+          className={`px-3 py-1 rounded ${selectedTab === 'all' ? 'bg-gray-600 text-white' : 'bg-gray-700 text-gray-300'}`}
+          type="button"
+        >
+          All ({orders.length})
+        </button>
+      </div>
 
       {isLoading ? (
         <div className="text-center py-10">
@@ -376,32 +466,94 @@ export default function OrdersPage(): JSX.Element {
                 'web',
             };
 
+            const status = (order.orderStatus ?? '').toLowerCase();
+            const isCancelled = status === 'cancelled' || status === 'cancel';
+
             return (
               <div
                 key={order.id}
                 role="button"
                 tabIndex={0}
                 onClick={() => handleCardClick(order.id)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') handleCardClick(order.id);
-                }}
-                className="relative bg-gray-800 rounded-lg shadow-md hover:shadow-lg transition-shadow duration-300 ease-in-out p-6 cursor-pointer focus:outline-none focus:ring-2 focus:ring-blue-500"
+                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleCardClick(order.id); }}
+                className={`relative rounded-lg shadow-md transition-shadow duration-300 ease-in-out p-6 pr-14 sm:pr-16 cursor-pointer focus:outline-none focus:ring-2 ${isCancelled ? 'bg-gray-800/80 opacity-70' : 'bg-gray-800 hover:shadow-lg'
+                  }`}
               >
-                {/* share icon top-right (stopPropagation so card doesn't open) */}
-                <div
-                  className="absolute top-3 right-3 z-20"
-                  onClick={(ev) => ev.stopPropagation()}
-                  onKeyDown={(ev) => ev.stopPropagation()}
-                  role="button"
-                  tabIndex={0}
-                >
-                  <ShareOrderIcon order={orderForShare} phone={order.customerPhone ?? ''} />
+                {/* top-right controls: share and cancel/restore */}
+                <div className="absolute top-3 right-3 z-20 flex items-center gap-2" onClick={(ev) => ev.stopPropagation()}>
+                  <div
+                    className="inline-block"
+                    onClick={(ev) => ev.stopPropagation()}
+                    onKeyDown={(ev) => ev.stopPropagation()}
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Share order"
+                  >
+                    <ShareOrderIcon order={orderForShare} phone={order.customerPhone ?? ''} />
+                  </div>
+
+                  {selectedTab === 'cancelled' ? (
+                    <button
+                      type="button"
+                      title="Restore order"
+                      aria-label={`Restore order ${order.id}`}
+                      onClick={async (ev) => {
+                        ev.stopPropagation();
+                        // restore to Unconfirmed by default (you can change logic to keep previous status)
+                        await markOrderStatus(order.id, 'Unconfirmed');
+                      }}
+                      className="p-2 rounded hover:bg-gray-700 focus:outline-none"
+                    >
+                      {actionId === order.id ? (
+                        <svg className="animate-spin h-4 w-4 text-green-400" viewBox="0 0 24 24" aria-hidden>
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                        </svg>
+                      ) : (
+                        <FaUndo className="text-green-400" />
+                      )}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      title="Cancel order"
+                      aria-label={`Cancel order ${order.id}`}
+                      onClick={async (ev) => {
+                        ev.stopPropagation();
+                        await markOrderStatus(order.id, 'Cancelled');
+                      }}
+                      className="p-2 rounded hover:bg-gray-700 focus:outline-none"
+                    >
+                      {actionId === order.id ? (
+                        <svg className="animate-spin h-4 w-4 text-red-400" viewBox="0 0 24 24" aria-hidden>
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                        </svg>
+                      ) : (
+                        <FaTrash className="text-red-400" />
+                      )}
+                    </button>
+                  )}
                 </div>
 
                 <div className="flex items-start">
                   <div className="min-w-0">
-                    <h2 className="text-lg font-bold text-white truncate">{order.customerName || '—'}</h2>
+                    <h2 className={`text-lg font-bold ${isCancelled ? 'text-gray-300' : 'text-white'} truncate`}>{order.customerName || '—'}</h2>
                     <p className="text-sm text-gray-400 truncate">{order.agentName || '—'}</p>
+                  </div>
+
+                  {/* status badge left top (if cancelled show red badge) */}
+                  <div className="ml-3">
+                    {isCancelled && (
+                      <div className="inline-flex items-center px-2 py-1 rounded text-xs font-semibold bg-red-700 text-white">
+                        Cancelled
+                      </div>
+                    )}
+                    {!isCancelled && (order.orderStatus ? (
+                      <div className="inline-flex items-center px-2 py-1 rounded text-xs font-semibold bg-green-700 text-white">
+                        {order.orderStatus}
+                      </div>
+                    ) : null)}
                   </div>
                 </div>
 
