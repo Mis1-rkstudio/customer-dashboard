@@ -46,14 +46,66 @@ function getRowsFromPayload(payload: unknown): unknown[] {
   return [];
 }
 
+// function getCleanFileUrl(fileUrl?: string): string | null {
+//   if (!fileUrl) return null;
+//   try {
+//     return String(fileUrl).replace(/\/view\?usp=.*$/i, '');
+//   } catch {
+//     return null;
+//   }
+// }
+
+/**
+ * Normalize various file URL shapes (most importantly Google Drive links)
+ * into a direct URL suitable for <img> / next/image.
+ *
+ * Returns null when no usable file URL can be produced.
+ */
 function getCleanFileUrl(fileUrl?: string): string | null {
   if (!fileUrl) return null;
   try {
-    return String(fileUrl).replace(/\/view\?usp=.*$/i, '');
+    const s = String(fileUrl).trim();
+    if (!s) return null;
+
+    // 1) canonicalize Google Drive share links:
+    // - https://drive.google.com/file/d/<FILEID>/view?usp=sharing
+    // - https://drive.google.com/open?id=<FILEID>
+    // - https://docs.google.com/uc?export=download&id=<FILEID>
+    // -> normalize to: https://drive.google.com/uc?export=view&id=<FILEID>
+    const driveFileMatch = s.match(/\/file\/d\/([a-zA-Z0-9_-]{10,})/i);
+    if (driveFileMatch && driveFileMatch[1]) {
+      const id = driveFileMatch[1];
+      return `https://drive.google.com/uc?export=view&id=${id}`;
+    }
+
+    const driveOpenMatch = s.match(/[?&]id=([a-zA-Z0-9_-]{10,})/i);
+    if (driveOpenMatch && driveOpenMatch[1] && s.includes('drive.google.com')) {
+      const id = driveOpenMatch[1];
+      return `https://drive.google.com/uc?export=view&id=${id}`;
+    }
+
+    // 2) If it's already a docs/uc direct link, return it
+    if (s.includes('drive.google.com/uc') || s.includes('googleusercontent.com')) {
+      return s;
+    }
+
+    // 3) convert some "view?usp=sharing" style links by removing query parts
+    // (useful for generic file hosts where removing query shows the file)
+    const withoutView = s.replace(/\/view(\?.*)?$/i, '');
+    if (withoutView !== s) return withoutView;
+
+    // 4) If the link ends with a typical image extension, keep it
+    if (/\.(jpe?g|png|gif|webp|avif|svg)(\?.*)?$/i.test(s)) return s;
+
+    // 5) fallback: return original string but only if it looks like an http(s) url
+    if (/^https?:\/\//i.test(s)) return s;
+
+    return null;
   } catch {
     return null;
   }
 }
+
 
 function classifyStock(qty: number | null | undefined): 'low' | 'medium' | 'high' | 'unknown' {
   if (qty === null || qty === undefined) return 'unknown';
@@ -173,8 +225,9 @@ export default function ItemsPage(): JSX.Element {
           const name = String(rec['Item'] ?? rec['Product_Code'] ?? id).trim();
           const colors = Array.isArray(rec['Colors']) ? (rec['Colors'] as unknown[]).map((c) => String(c ?? '').trim()).filter(Boolean) : [];
           const thumbnail = (rec['Thumbnail_URL'] ?? rec['thumbnail'] ?? null) as string | null;
-          const fileUrl = getCleanFileUrl((rec['File_URL'] ?? rec['FileUrl'] ?? rec['file_url']) as string | undefined);
-          const image = (thumbnail || fileUrl) ?? null;
+          const rawFileUrl = (rec['File_URL'] ?? rec['FileUrl'] ?? rec['file_url'] ?? rec['FileUrl_raw']) as string | undefined;
+          const fileUrl = getCleanFileUrl(rawFileUrl);
+          const image = (fileUrl || thumbnail) ?? null;
           const concept = (rec['Concept'] ?? rec['Concept_2'] ?? rec['Concept_1'] ?? null) as string | null;
           const fabric = (rec['Fabric'] ?? rec['Concept_3'] ?? null) as string | null;
           const closingStockRaw = rec['Closing_Stock'] ?? rec['ClosingStock'] ?? rec['closing_stock'] ?? null;

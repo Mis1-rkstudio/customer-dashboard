@@ -35,6 +35,22 @@ function formatDate(input: unknown): string {
         /* fall through */
       }
     }
+    // Firestore Timestamp-like with toDate()
+    if ('toDate' in rec && typeof (rec as any).toDate === 'function') {
+      try {
+        const d = (rec as any).toDate();
+        if (d instanceof Date && !Number.isNaN(d.getTime())) return d.toLocaleString();
+      } catch {
+        /* fall through */
+      }
+    }
+    // nested value form { value: 'ISO...' }
+    if ('value' in rec && typeof rec.value === 'string') {
+      try {
+        const d = new Date(rec.value);
+        if (!Number.isNaN(d.getTime())) return d.toLocaleString();
+      } catch { /* ignore */ }
+    }
   }
   try {
     const d = new Date(String(input));
@@ -74,9 +90,27 @@ type NormalizedOrder = {
   raw?: unknown;
 };
 
+/** Extract createdAt from common nested shapes */
+function extractCreatedAtFromOrder(o: Record<string, unknown>): unknown {
+  const v = o['createdAt'] ?? o['created_at'] ?? o['placedAt'] ?? o['Placed'] ?? o['createdDate'] ?? null;
+  if (!v) return null;
+  if (isObject(v)) {
+    // nested { value: 'ISO' }
+    if ('value' in v && typeof (v as any).value === 'string') return (v as any).value;
+    // Firestore seconds object
+    if ('seconds' in v && typeof (v as any).seconds === 'number') return v;
+    // toDate()
+    if ('toDate' in v && typeof (v as any).toDate === 'function') {
+      try { return (v as any).toDate(); } catch { /* ignore */ }
+    }
+  }
+  return v;
+}
+
 /**
  * Normalize a saved order document into a consistent shape used by the UI.
- * Handles grouped items [{ itemName, colors: [{ color, sets }] }] and flat rows.
+ * Handles grouped items [{ itemName, colors: [{ color, sets }] }] (or colors: ["GREY", ...] with item-level sets)
+ * and flat rows.
  */
 function normalizeOrder(order: RawOrder): NormalizedOrder {
   if (!order || typeof order !== 'object') {
@@ -90,30 +124,42 @@ function normalizeOrder(order: RawOrder): NormalizedOrder {
     };
   }
 
-  const o = order as Record<string, unknown>;
+  let o = order as Record<string, unknown>;
+
+  // If wrapper with payload (string or object), prefer payload
+  if ('payload' in o) {
+    const p = o.payload;
+    if (typeof p === 'string' && p.trim()) {
+      try {
+        const parsed = JSON.parse(p);
+        if (isObject(parsed)) o = parsed;
+      } catch {
+        // ignore parse error
+      }
+    } else if (isObject(p)) {
+      o = p as Record<string, unknown>;
+    }
+  }
 
   const customerObj = (o.customer as Record<string, unknown>) ?? {};
   const agentObj = (o.agent as Record<string, unknown>) ?? {};
 
-  const customerName = toSafeString(
-    o.customerName ?? customerObj.name ?? customerObj.label ?? customerObj.Company_Name ?? ''
-  );
+  const customerName = toSafeString(o.customerName ?? customerObj.name ?? customerObj.label ?? customerObj.Company_Name ?? '');
   const customerEmail = toSafeString(o.customerEmail ?? customerObj.email ?? customerObj.Email ?? '');
-  const customerPhone = toSafeString(
-    o.customerPhone ?? customerObj.phone ?? customerObj.phoneNumber ?? customerObj.Number ?? ''
-  );
+  const customerPhone = toSafeString(o.customerPhone ?? customerObj.phone ?? customerObj.phoneNumber ?? customerObj.Number ?? '');
 
   const agentName = toSafeString(o.agentName ?? agentObj.name ?? agentObj.label ?? '');
   const agentEmail = toSafeString(o.agentEmail ?? agentObj.email ?? agentObj.Email ?? '');
   const agentPhone = toSafeString(o.agentPhone ?? agentObj.number ?? agentObj.phone ?? agentObj.Contact_Number ?? '');
 
-  const itemsRawCandidate = o.items ?? o.rows ?? [];
+  const itemsRawCandidate = o.items ?? o.rows ?? o.itemsFlat ?? [];
   const itemsRaw = Array.isArray(itemsRawCandidate) ? (itemsRawCandidate as unknown[]) : [];
 
   let items: RowItem[] = [];
 
   if (Array.isArray(itemsRaw) && itemsRaw.length > 0) {
     const first = itemsRaw[0];
+
     // grouped shape: first.colors is an array
     if (first && typeof first === 'object' && Array.isArray((first as Record<string, unknown>).colors)) {
       const expanded: RowItem[] = [];
@@ -121,17 +167,22 @@ function normalizeOrder(order: RawOrder): NormalizedOrder {
         if (!itUn || typeof itUn !== 'object') continue;
         const it = itUn as Record<string, unknown>;
         const itemName = toSafeString(it.itemName ?? it.Item ?? it.label ?? it.value ?? it.sku ?? it.name ?? '');
-        if (!Array.isArray(it.colors)) continue;
-        for (const cUn of it.colors as unknown[]) {
+        const colors = Array.isArray(it.colors) ? (it.colors as unknown[]) : [];
+        // item-level sets (applies when colors are primitive strings)
+        const itemLevelSets = Number(it.sets ?? it.set ?? 0) || 0;
+
+        for (const cUn of colors) {
           if (cUn === null || cUn === undefined) continue;
           if (typeof cUn === 'object') {
             const c = cUn as Record<string, unknown>;
-            const color = toSafeString(c.color ?? c.colorName ?? c.value ?? '');
-            const sets = Number(c.sets ?? c.set ?? c.qty ?? c.quantity ?? 0) || 0;
+            const color = toSafeString(c.color ?? c.colorName ?? c.value ?? c.label ?? '');
+            const sets = Number(c.sets ?? c.set ?? c.qty ?? c.quantity ?? itemLevelSets) || 0;
             expanded.push({ itemName, color, quantity: sets });
           } else {
+            // primitive color string — assign item-level sets (if provided)
             const color = toSafeString(cUn);
-            expanded.push({ itemName, color, quantity: 0 });
+            const sets = itemLevelSets;
+            expanded.push({ itemName, color, quantity: sets });
           }
         }
       }
@@ -144,17 +195,18 @@ function normalizeOrder(order: RawOrder): NormalizedOrder {
         const it = itUn as Record<string, unknown>;
         const itemName = toSafeString(
           it.itemName ??
-            (it.item as Record<string, unknown>)?.label ??
-            (it.item as Record<string, unknown>)?.Item ??
-            it.skuLabel ??
-            it.label ??
-            it.sku ??
-            it.name ??
-            (it.item as Record<string, unknown>)?.value ??
-            ''
+          (isObject(it.item) ? ((it.item as Record<string, unknown>).label ?? (it.item as Record<string, unknown>).Item ?? (it.item as Record<string, unknown>).value) : '') ??
+          it.skuLabel ??
+          it.label ??
+          it.sku ??
+          it.name ??
+          ''
         );
         const color = toSafeString(
-          (it.color as Record<string, unknown>)?.label ?? it.color ?? it.colorName ?? it.colorValue ?? ''
+          (isObject(it.color) ? ((it.color as Record<string, unknown>).label ?? (it.color as Record<string, unknown>).value) : it.color) ??
+          it.colorName ??
+          it.colorValue ??
+          ''
         );
         const qty = Number(it.quantity ?? it.qty ?? it.sets ?? it.set ?? 0) || 0;
         mapped.push({ itemName, color, quantity: qty });
@@ -163,11 +215,13 @@ function normalizeOrder(order: RawOrder): NormalizedOrder {
     }
   }
 
+  const createdAt = extractCreatedAtFromOrder(o);
+
   return {
     customer: { name: customerName, email: customerEmail, phone: customerPhone },
     agent: { name: agentName, email: agentEmail, number: agentPhone },
     items,
-    createdAt: o.createdAt ?? o.created_at ?? null,
+    createdAt,
     source: (o.source as string) ?? 'web',
     raw: order,
   };
@@ -187,6 +241,7 @@ function aggregateItems(items: RowItem[]): RowItem[] {
 export default function OrderDetailsPage(): JSX.Element {
   const [orderRaw, setOrderRaw] = useState<RawOrder>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [fetchError, setFetchError] = useState<string>('');
 
   // narrow useParams typing so we don't use `any`
   const params = useParams() as Partial<Record<string, string | undefined>>;
@@ -203,49 +258,101 @@ export default function OrderDetailsPage(): JSX.Element {
 
     async function fetchOrderDetails(): Promise<void> {
       setIsLoading(true);
+      setFetchError('');
       try {
-        const res = await fetch(`/api/orders/${orderId}`);
-        const text = await res.text().catch(() => '');
-        let data: unknown = null;
-        try {
-          data = text ? JSON.parse(text) : null;
-        } catch (parseErr) {
-          console.warn('Order details: response not JSON', { status: res.status, text, parseErr });
-        }
+        // server returns a list — fetch the list and find matching row by id or payload.id
+        const res = await fetch('/api/orders');
+        const data = await res.json().catch(() => null);
 
         if (!res.ok) {
-          const maybeObj = (typeof data === 'object' && data !== null) ? (data as Record<string, unknown>) : null;
-          const msg = (maybeObj && typeof maybeObj.message === 'string') ? maybeObj.message : text || `HTTP ${res.status}`;
-          console.error('Failed to fetch order:', res.status, msg);
-          if (!canceled) setOrderRaw(null);
+          const txt = (isObject(data) && (data as Record<string, unknown>).message) ? (data as Record<string, unknown>).message : `HTTP ${res.status}`;
+          throw new Error(String(txt));
+        }
+
+        // normalize list shapes
+        let rows: unknown[] = [];
+        if (Array.isArray(data)) rows = data;
+        else if (isObject(data) && Array.isArray((data as Record<string, unknown>).rows)) rows = (data as Record<string, unknown>).rows as unknown[];
+        else if (isObject(data) && Array.isArray((data as Record<string, unknown>).orders)) rows = (data as Record<string, unknown>).orders as unknown[];
+        else rows = [];
+
+        // find the matching record by id or payload.id/orderId/order_id
+        const match = rows.find((r) => {
+          if (!isObject(r)) return false;
+          const rec = r as Record<string, unknown>;
+
+          // check top-level ids
+          const topIds = [
+            toSafeString(rec['id']),
+            toSafeString(rec['orderId']),
+            toSafeString(rec['order_id']),
+            toSafeString(rec['ID']),
+          ].filter(Boolean);
+          if (topIds.some((tid) => tid === orderId)) return true;
+
+          // inspect payload (string or object)
+          if ('payload' in rec) {
+            const p = rec.payload;
+            if (typeof p === 'string' && p.trim()) {
+              try {
+                const parsed = JSON.parse(p);
+                if (isObject(parsed)) {
+                  const pid = toSafeString((parsed as Record<string, unknown>)['id'] ?? (parsed as Record<string, unknown>)['orderId'] ?? (parsed as Record<string, unknown>)['order_id']);
+                  if (pid === orderId) return true;
+                }
+              } catch { /* ignore */ }
+            } else if (isObject(p)) {
+              const pid = toSafeString((p as Record<string, unknown>)['id'] ?? (p as Record<string, unknown>)['orderId'] ?? (p as Record<string, unknown>)['order_id']);
+              if (pid === orderId) return true;
+            }
+          }
+
+          // other nested fields to check
+          const nestedId = toSafeString(rec['orderId'] ?? rec['payload'] ?? rec['order'] ?? '');
+          if (nestedId === orderId) return true;
+
+          return false;
+        });
+
+        if (!match) {
+          // not found
+          if (!canceled) {
+            setOrderRaw(null);
+            setFetchError('Order not found in server response.');
+          }
           return;
         }
 
-        let payloadOrder: unknown = null;
-        if (data && typeof data === 'object') {
-          const dobj = data as Record<string, unknown>;
-          if (dobj.ok === true && dobj.order) payloadOrder = dobj.order;
-          else if (dobj.ok === false) {
-            console.error('Server returned ok:false for order fetch', dobj);
-            if (!canceled) setOrderRaw(null);
+        // prefer parsed payload if present
+        if (isObject(match)) {
+          const rec = match as Record<string, unknown>;
+          if (typeof rec.payload === 'string' && rec.payload.trim()) {
+            try {
+              const parsed = JSON.parse(rec.payload);
+              if (isObject(parsed)) {
+                if (!canceled) setOrderRaw(parsed as RawOrder);
+                return;
+              }
+            } catch { /* ignore */ }
+          } else if (isObject(rec.payload)) {
+            if (!canceled) setOrderRaw(rec.payload as RawOrder);
             return;
-          } else payloadOrder = data;
-        } else {
-          console.warn('Order details: response had no JSON body', { text });
-          if (!canceled) setOrderRaw(null);
-          return;
+          }
         }
 
-        if (!canceled) setOrderRaw(payloadOrder as RawOrder);
+        if (!canceled) setOrderRaw(match as RawOrder);
       } catch (err) {
         console.error('Error fetching order:', err);
-        if (!canceled) setOrderRaw(null);
+        if (!canceled) {
+          setOrderRaw(null);
+          setFetchError(err instanceof Error ? err.message : String(err));
+        }
       } finally {
         if (!canceled) setIsLoading(false);
       }
     }
 
-    fetchOrderDetails();
+    void fetchOrderDetails();
     return () => {
       canceled = true;
     };
@@ -267,6 +374,7 @@ export default function OrderDetailsPage(): JSX.Element {
     return (
       <div className="w-full max-w-4xl mx-auto text-center py-20">
         <p className="text-gray-300">Order not found or there was an error fetching it.</p>
+        {fetchError ? <p className="text-red-400 mt-2">{fetchError}</p> : null}
         <div className="mt-4">
           <Link href="/orders" className="text-blue-400 hover:underline">← Back to Orders</Link>
         </div>
@@ -279,14 +387,8 @@ export default function OrderDetailsPage(): JSX.Element {
   const totalQty = aggregatedItems.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
 
   // use safe helpers instead of `any` casts
-  const customerName = safe(
-    normalized.customer.name ?? getFirst(normalized.customer, 'label', 'value'),
-    '—'
-  );
-  const customerEmail = safe(
-    normalized.customer.email ?? getFirst(normalized.customer, 'Email'),
-    '—'
-  );
+  const customerName = safe(normalized.customer.name ?? getFirst(normalized.customer, 'label', 'value'), '—');
+  const customerEmail = safe(normalized.customer.email ?? getFirst(normalized.customer, 'Email'), '—');
   const customerPhoneRaw = (normalized.customer.phone ?? getFirst(normalized.customer, 'phoneNumber', 'Number')) ?? '';
   const customerPhone = safe(customerPhoneRaw, '—');
 
@@ -298,11 +400,10 @@ export default function OrderDetailsPage(): JSX.Element {
 
   // Build OrderShape to pass to the share component (use imported OrderShape)
   const orderForShare: OrderShape = {
-    id: orderId,
+    id: orderId ?? '',
     customer: { name: customerName, phone: customerPhone, email: customerEmail },
     agent: { name: agentName, number: agentPhone, email: agentEmail },
     items: aggregatedItems.map((it) => ({ itemName: it.itemName, color: it.color, quantity: it.quantity })),
-    // normalize createdAt to a type accepted by OrderShape (no `any` used)
     createdAt: normalized.createdAt as OrderShape['createdAt'],
     source: normalized.source,
   };

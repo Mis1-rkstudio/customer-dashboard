@@ -1,21 +1,22 @@
-// /api/orders/route.ts (or wherever your API orders handler is)
+// app/api/orders/route.ts
 import { NextResponse } from 'next/server';
-import { db } from '@/lib/firebase-admin';
-import { Timestamp } from 'firebase-admin/firestore';
+import { BigQuery } from '@google-cloud/bigquery';
 
 type RawRecord = Record<string, unknown>;
+type NormalizedItemRow = { sku: string; itemName: string; color: string; quantity: number };
+type GroupedColor = { color: string; sets: number };
+type GroupedItem = { itemName: string; colors: GroupedColor[] };
 
-// normalized incoming item row returned by normalizeItems
-type NormalizedItemRow = {
-  sku: string;
-  itemName: string;
-  color: string;
-  quantity: number;
-};
+/** ========== CONFIG ========== */
+// prefer env vars; fallbacks kept for local dev only
+const BQ_PROJECT_ID = process.env.BQ_PROJECT_ID || 'round-kit-450201-r9';
+const BQ_DATASET_ID = process.env.BQ_DATASET_ID || 'frono_2025';
+const BQ_TABLE_ID = process.env.BQ_TABLE_ID || 'orders';
+const DEFAULT_LIMIT = 500;
 
-type GroupedItem = { itemName: string; colors: { color: string; sets: number }[] };
+const bigquery = new BigQuery({ projectId: BQ_PROJECT_ID });
 
-/** simple runtime helpers */
+/** ========== small helpers ========== */
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
 }
@@ -29,77 +30,15 @@ function safeNumber(v: unknown): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
-/** Type-guard for Firestore Timestamp-like objects */
-function hasToDate(v: unknown): v is { toDate: () => Date } {
-  return isObject(v) && typeof (v as { toDate?: unknown }).toDate === 'function';
-}
-
-/** Ensure we have a customer in `customers` collection.
- * Accepts unknown payload shapes and returns an id + created flag.
- */
-async function ensureCustomer(customerPayload: unknown): Promise<{ id: string; created: boolean }> {
-  if (isObject(customerPayload) && customerPayload['id']) {
-    return { id: String(customerPayload['id']), created: false };
-  }
-
-  const name = isObject(customerPayload)
-    ? safeString(customerPayload['label'] ?? customerPayload['value'] ?? customerPayload['name'])
-    : safeString(customerPayload);
-  const email = isObject(customerPayload) ? safeString(customerPayload['email'] ?? customerPayload['Email']) : '';
-  const phone = isObject(customerPayload)
-    ? safeString(customerPayload['phone'] ?? customerPayload['Number'] ?? customerPayload['contact'])
-    : '';
-  const broker = isObject(customerPayload) ? safeString(customerPayload['Broker'] ?? customerPayload['broker']) : '';
-
-  const docRef = await db.collection('customers').add({
-    name,
-    email,
-    phone,
-    broker,
-    createdAt: Timestamp.now(),
-  });
-
-  return { id: docRef.id, created: true };
-}
-
-/** Ensure agent exists. Returns id + created flag (id may be null if no agent payload) */
-async function ensureAgent(agentPayload: unknown): Promise<{ id: string | null; created: boolean }> {
-  if (!agentPayload) return { id: null, created: false };
-
-  if (isObject(agentPayload) && agentPayload['id']) {
-    return { id: String(agentPayload['id']), created: false };
-  }
-
-  const name = isObject(agentPayload)
-    ? safeString(agentPayload['label'] ?? agentPayload['value'] ?? agentPayload['name'])
-    : safeString(agentPayload);
-  const email = isObject(agentPayload) ? safeString(agentPayload['email'] ?? agentPayload['Email']) : '';
-  const phone = isObject(agentPayload) ? safeString(agentPayload['phone'] ?? agentPayload['Contact_Number']) : '';
-  const number = isObject(agentPayload) ? safeString(agentPayload['number'] ?? agentPayload['Number']) : '';
-
-  const docRef = await db.collection('agents').add({
-    name,
-    email,
-    phone,
-    number,
-    createdAt: Timestamp.now(),
-  });
-
-  return { id: docRef.id, created: true };
-}
-
-/** Normalize arbitrary incoming item shapes into a predictable array of rows */
+/** Normalize incoming item rows (handles many shapes) */
 function normalizeItems(itemsInput: unknown): NormalizedItemRow[] {
   if (!Array.isArray(itemsInput)) return [];
-
   return (itemsInput as unknown[]).map((raw): NormalizedItemRow => {
-    if (!isObject(raw)) {
-      return { sku: '', itemName: '', color: '', quantity: 0 };
-    }
+    if (!isObject(raw)) return { sku: '', itemName: '', color: '', quantity: 0 };
 
     const sku =
       safeString(raw['sku']) ||
-      safeString(isObject(raw['item']) ? (raw['item']['value'] ?? raw['item']['id']) : '') ||
+      safeString(isObject(raw['item']) ? ((raw['item'] as RawRecord)['value'] ?? (raw['item'] as RawRecord)['id']) : '') ||
       safeString(raw['itemId']) ||
       '';
 
@@ -111,125 +50,204 @@ function normalizeItems(itemsInput: unknown): NormalizedItemRow[] {
       safeString(raw['skuLabel']) ??
       sku;
 
-    const itemName = itemNameCandidate || sku || '';
-
     const color =
       safeString(raw['color']) ||
       (isObject(raw['color']) ? safeString((raw['color'] as RawRecord)['value']) : '') ||
       '';
 
-    const qtyRaw = raw['qty'] ?? raw['quantity'] ?? raw['quantityFromClient'] ?? raw['sets'] ?? raw['set'] ?? null;
+    const qtyRaw = raw['qty'] ?? raw['quantity'] ?? raw['sets'] ?? raw['set'] ?? null;
     const quantity = safeNumber(qtyRaw);
 
+    return { sku: String(sku), itemName: String(itemNameCandidate || sku), color, quantity };
+  });
+}
+
+/** group by itemName and color -> GroupedItem[] (colors as objects with sets) */
+function groupItemsToColors(rows: NormalizedItemRow[]): GroupedItem[] {
+  const map = new Map<string, GroupedItem>();
+  for (const r of rows) {
+    const name = r.itemName || r.sku || 'unknown';
+    let entry = map.get(name);
+    if (!entry) {
+      entry = { itemName: name, colors: [] };
+      map.set(name, entry);
+    }
+    const colorName = safeString(r.color) || '';
+    const qty = Number(r.quantity) || 0;
+    const colorEntry = entry.colors.find((c) => c.color === colorName);
+    if (colorEntry) colorEntry.sets += qty;
+    else entry.colors.push({ color: colorName, sets: qty });
+  }
+  return Array.from(map.values());
+}
+
+/** convert grouped form into desired payload shape */
+function groupedItemsToPayloadShape(grouped: GroupedItem[]) {
+  return grouped.map((g) => {
+    const colors = Array.from(new Set(g.colors.map((c) => (c.color || '').trim()).filter(Boolean)));
+    const setsVals = g.colors.map((c) => Number(c.sets) || 0);
+    const uniqueSets = Array.from(new Set(setsVals));
+    let sets: number;
+    if (uniqueSets.length === 1) {
+      sets = uniqueSets[0];
+    } else {
+      sets = setsVals.reduce((s, v) => s + v, 0);
+    }
     return {
-      sku: String(sku),
-      itemName: String(itemName),
-      color,
-      quantity,
+      itemName: g.itemName,
+      colors,
+      sets,
     };
   });
 }
 
-/** group flat rows into grouped items by itemName and color */
-function groupItemsToColors(rows: NormalizedItemRow[]): GroupedItem[] {
-  const grouped: GroupedItem[] = [];
-
-  for (const r of rows) {
-    const name = r.itemName || r.sku || 'unknown';
-    let entry = grouped.find((g) => g.itemName === name);
-    if (!entry) {
-      entry = { itemName: name, colors: [] };
-      grouped.push(entry);
-    }
-
-    const colorName = safeString(r.color);
-    const qty = Number(r.quantity) || 0;
-    const colorEntry = entry.colors.find((c) => c.color === colorName);
-    if (colorEntry) {
-      colorEntry.sets += qty;
-    } else {
-      entry.colors.push({ color: colorName, sets: qty });
-    }
+/** create dataset if it doesn't exist */
+async function ensureDatasetExists(projectId: string, datasetId: string) {
+  const [exists] = await bigquery.dataset(datasetId).exists();
+  if (!exists) {
+    await bigquery.createDataset(datasetId);
   }
-
-  return grouped;
 }
 
-/** GET /api/orders - list orders */
+/** create table if it doesn't exist
+ *  NOTE: this schema contains both explicit columns and payload
+ */
+async function ensureTableExists(projectId: string, datasetId: string, tableId: string) {
+  const dataset = bigquery.dataset(datasetId);
+  const [tableExists] = await dataset.table(tableId).exists();
+  if (tableExists) return;
+
+  const schema = {
+    fields: [
+      { name: 'id', type: 'STRING', mode: 'REQUIRED' },
+      { name: 'createdAt', type: 'TIMESTAMP' },
+      { name: 'customerName', type: 'STRING' },
+      { name: 'customerNumber', type: 'STRING' },
+      { name: 'customerEmail', type: 'STRING' },
+      { name: 'agentName', type: 'STRING' },
+      { name: 'agentNumber', type: 'STRING' },
+      { name: 'orderStatus', type: 'STRING' },
+      { name: 'totalQty', type: 'INTEGER' },
+      { name: 'items', type: 'STRING' },   // stringified JSON
+      { name: 'payload', type: 'STRING' }, // full canonical payload
+      // soft-delete metadata
+      { name: 'cancelledAt', type: 'TIMESTAMP' },
+      { name: 'cancelledBy', type: 'STRING' },
+    ],
+  };
+
+  await dataset.createTable(tableId, { schema });
+}
+
+/** helper to insert into BigQuery table (catches/throws detailed errors) */
+async function insertRowToBigQuery(
+  projectId: string,
+  datasetId: string,
+  tableId: string,
+  row: Record<string, unknown>
+) {
+  const dataset = bigquery.dataset(datasetId, { projectId });
+  const table = dataset.table(tableId);
+  try {
+    await table.insert([row], { ignoreUnknownValues: false });
+    return { ok: true };
+  } catch (err: unknown) {
+    const e = err as any;
+    const detail = {
+      message: e?.message ?? String(e),
+      errors: e?.errors ?? undefined,
+      reason: e?.reason ?? undefined,
+      info: e,
+    };
+    const out = new Error('BigQuery insert failed: ' + (detail.message || 'unknown'));
+    (out as any).bigQueryDetails = detail;
+    throw out;
+  }
+}
+
+/** Query helper (returns rows from a SQL query) */
+async function runQuery(sql: string, params?: { [k: string]: unknown }) {
+  // Use createQueryJob for larger queries; params optional.
+  const options: any = { query: sql, location: 'US' };
+  if (params) options.params = params;
+  const [job] = await bigquery.createQueryJob(options);
+  const [rows] = await job.getQueryResults();
+  return rows;
+}
+
+/** =========================
+ *  GET: read orders from BigQuery
+ *  ========================= */
 export async function GET(): Promise<NextResponse> {
   try {
-    const snapshot = await db.collection('orders').orderBy('createdAt', 'desc').limit(500).get();
-    const orders: unknown[] = [];
+    if (!BQ_PROJECT_ID || !BQ_DATASET_ID || !BQ_TABLE_ID) {
+      return NextResponse.json({ ok: false, message: 'BQ config missing' }, { status: 500 });
+    }
+    await ensureDatasetExists(BQ_PROJECT_ID, BQ_DATASET_ID);
+    await ensureTableExists(BQ_PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID);
 
-    snapshot.forEach((doc) => {
-      const dataRaw = (doc.data() ?? {}) as RawRecord;
+    const fullTable = `\`${BQ_PROJECT_ID}.${BQ_DATASET_ID}.${BQ_TABLE_ID}\``;
+    // NOTE: do not use parameterized LIMIT here — inline a safe integer.
+    const sql = `SELECT id, createdAt, customerName, customerNumber, customerEmail, agentName, agentNumber, orderStatus, totalQty, items, payload
+                 FROM ${fullTable}
+                 ORDER BY createdAt DESC
+                 LIMIT ${Number(DEFAULT_LIMIT)}`;
 
-      let createdAtIso: string | null = null;
-      const createdAtVal = dataRaw['createdAt'];
-      if (createdAtVal) {
-        try {
-          if (hasToDate(createdAtVal)) {
-            const d = createdAtVal.toDate();
-            if (!Number.isNaN(d.getTime())) createdAtIso = d.toISOString();
-          } else {
-            const d = new Date(String(createdAtVal));
-            if (!Number.isNaN(d.getTime())) createdAtIso = d.toISOString();
-          }
-        } catch {
-          createdAtIso = null;
+    const rows = await runQuery(sql);
+
+    const out = (rows as any[]).map((r) => {
+      const parsedItems = (() => {
+        if (typeof r.items === 'string' && r.items) {
+          try { return JSON.parse(r.items); } catch { return r.items; }
         }
-      }
-
-      const items = Array.isArray(dataRaw['items']) ? (dataRaw['items'] as unknown[]) : [];
-
-      let totalQty = 0;
-      for (const it of items) {
-        if (isObject(it) && Array.isArray(it['colors'])) {
-          for (const c of it['colors'] as unknown[]) {
-            if (isObject(c)) totalQty += safeNumber(c['sets']);
-          }
-        } else if (isObject(it)) {
-          totalQty += safeNumber(it['quantity'] ?? it['qty'] ?? it['sets']);
+        if (typeof r.payload === 'string') {
+          try {
+            const p = JSON.parse(r.payload);
+            return p?.items ?? r.payload;
+          } catch { return r.payload; }
         }
-      }
+        return r.items;
+      })();
 
-      orders.push({
-        id: doc.id,
-        customerName: safeString(dataRaw['customerName'] ?? dataRaw['customer'] ?? ''),
-        customerEmail: safeString(
-          dataRaw['customerEmail'] ??
-          (isObject(dataRaw['customer']) ? (dataRaw['customer'] as RawRecord)['email'] : undefined)
-        ),
-        customerPhone: safeString(
-          dataRaw['customerPhone'] ??
-          (isObject(dataRaw['customer']) ? (dataRaw['customer'] as RawRecord)['phone'] : undefined)
-        ),
-        agentName: safeString(dataRaw['agentName'] ?? dataRaw['agent'] ?? ''),
-        agentPhone: safeString(
-          dataRaw['agentPhone'] ??
-          (isObject(dataRaw['agent']) ? (dataRaw['agent'] as RawRecord)['phone'] : undefined)
-        ),
-        items,
-        createdAt: createdAtIso,
-        totalQty,
-        source: safeString(dataRaw['source'] ?? null),
-        orderStatus: safeString(dataRaw['orderStatus'] ?? dataRaw['status'] ?? dataRaw['Order_Status'] ?? ''),
-      });
+      return {
+        id: r.id,
+        createdAt: r.createdAt,
+        customerName: r.customerName,
+        customerNumber: r.customerNumber,
+        customerEmail: r.customerEmail,
+        agentName: r.agentName,
+        agentNumber: r.agentNumber,
+        orderStatus: r.orderStatus,
+        totalQty: typeof r.totalQty === 'number' ? r.totalQty : Number(r.totalQty || 0),
+        items: parsedItems,
+        payload: (() => {
+          if (typeof r.payload === 'string') {
+            try { return JSON.parse(r.payload); } catch { return r.payload; }
+          }
+          return r.payload;
+        })(),
+        _rawRow: r,
+      };
     });
 
-    return NextResponse.json(orders);
+    return NextResponse.json(out);
   } catch (err: unknown) {
-    console.error('Failed to read orders:', err);
-    const msg = err instanceof Error ? err.message : String(err);
+    console.error('GET /api/orders error:', err);
+    const msg = err instanceof Error ? (err as any).message : String(err);
     return NextResponse.json({ ok: false, message: msg }, { status: 500 });
   }
 }
 
-/** POST /api/orders - create new order */
+/** =========================
+ *  POST: create order (insert into BigQuery)
+ * ========================= */
 export async function POST(req: Request): Promise<NextResponse> {
   try {
-    const body = (await req.json()) as unknown;
+    if (!BQ_PROJECT_ID || !BQ_DATASET_ID || !BQ_TABLE_ID) {
+      return NextResponse.json({ ok: false, message: 'BigQuery configuration missing' }, { status: 500 });
+    }
 
+    const body = (await req.json().catch(() => null)) as unknown;
     if (!isObject(body)) {
       return NextResponse.json({ ok: false, message: 'Bad Request: invalid JSON body' }, { status: 400 });
     }
@@ -237,201 +255,168 @@ export async function POST(req: Request): Promise<NextResponse> {
     const customerPayload = body['customer'];
     const agentPayload = body['agent'];
     const itemsInput = body['items'];
-    const rawOrderStatus = body['orderStatus'] ?? body['order_status'] ?? body['status'] ?? body['OrderStatus'];
+    const rawOrderStatus = body['orderStatus'] ?? body['order_status'] ?? body['status'];
 
-    if (!customerPayload) {
-      return NextResponse.json({ ok: false, message: 'Bad Request: Missing customer' }, { status: 400 });
-    }
+    if (!customerPayload) return NextResponse.json({ ok: false, message: 'Missing customer' }, { status: 400 });
     if (!itemsInput || !Array.isArray(itemsInput) || (itemsInput as unknown[]).length === 0) {
-      return NextResponse.json({ ok: false, message: 'Bad Request: Missing items' }, { status: 400 });
+      return NextResponse.json({ ok: false, message: 'Missing items' }, { status: 400 });
     }
-
-    const customerResult = await ensureCustomer(customerPayload);
-    const agentResult = await ensureAgent(agentPayload);
 
     const normalized = normalizeItems(itemsInput);
     const invalidItem = normalized.find((it) => (!it.sku && !it.itemName));
     if (invalidItem) {
-      return NextResponse.json({ ok: false, message: 'Bad Request: One or more items missing sku/name' }, { status: 400 });
+      return NextResponse.json({ ok: false, message: 'One or more items missing sku/name' }, { status: 400 });
     }
 
     const groupedItems = groupItemsToColors(normalized);
+    const itemsForPayload = groupedItemsToPayloadShape(groupedItems);
 
-    // Accept whatever non-empty string client sends for status (trimmed).
     let orderStatus = 'Unconfirmed';
     if (rawOrderStatus !== undefined && rawOrderStatus !== null) {
       const s = String(rawOrderStatus).trim();
       if (s) orderStatus = s;
     }
 
-    const orderDoc: RawRecord = {
-      customerName: safeString(
-        (isObject(customerPayload) && (customerPayload['label'] ?? customerPayload['name'])) ?? customerPayload
-      ),
-      customerEmail: isObject(customerPayload) ? safeString(customerPayload['email'] ?? customerPayload['Email']) : '',
-      customerPhone: isObject(customerPayload) ? safeString(customerPayload['phone'] ?? customerPayload['Number'] ?? customerPayload['contact']) : '',
-      agentName: agentPayload ? safeString((isObject(agentPayload) && (agentPayload['label'] ?? agentPayload['name'])) ?? agentPayload) : '',
-      agentPhone: agentPayload ? safeString((isObject(agentPayload) && (agentPayload['phone'] ?? agentPayload['Contact_Number'] ?? agentPayload['number'])) ?? '') : '',
-      items: groupedItems,
-      createdAt: Timestamp.now(),
+    const totalQty = normalized.reduce((s, it) => s + (Number(it.quantity) || 0), 0);
+
+    const orderId = (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)).toUpperCase();
+    const createdAt = new Date().toISOString();
+
+    const canonicalOrder = {
+      id: orderId,
+      customer: customerPayload,
+      agent: agentPayload ?? null,
+      items: itemsForPayload,
+      totalQty,
+      orderStatus,
+      createdAt,
       source: 'web',
-      orderStatus, // persist the string the client specified (or Unconfirmed)
     };
 
-    const newOrderRef = await db.collection('orders').add(orderDoc);
+    await ensureDatasetExists(BQ_PROJECT_ID, BQ_DATASET_ID);
+    await ensureTableExists(BQ_PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID);
 
-    // update customer/agent metadata — non-fatal
+    const customerName = isObject(customerPayload)
+      ? safeString((customerPayload as RawRecord).label ?? (customerPayload as RawRecord).name ?? '')
+      : safeString(customerPayload);
+    const customerNumber = isObject(customerPayload)
+      ? safeString((customerPayload as RawRecord).phone ?? (customerPayload as RawRecord).Number ?? (customerPayload as RawRecord).phoneNumber ?? '')
+      : '';
+    const customerEmail = isObject(customerPayload)
+      ? safeString((customerPayload as RawRecord).email ?? (customerPayload as RawRecord).Email ?? '')
+      : '';
+
+    const agentName = isObject(agentPayload)
+      ? safeString((agentPayload as RawRecord).label ?? (agentPayload as RawRecord).name ?? '')
+      : safeString(agentPayload);
+    const agentNumber = isObject(agentPayload)
+      ? safeString((agentPayload as RawRecord).number ?? (agentPayload as RawRecord).phone ?? (agentPayload as RawRecord).Contact_Number ?? '')
+      : '';
+
+    const row: Record<string, unknown> = {
+      id: orderId,
+      createdAt,
+      customerName,
+      customerNumber,
+      customerEmail,
+      agentName,
+      agentNumber,
+      orderStatus,
+      totalQty: Number(totalQty) || 0,
+      items: JSON.stringify(itemsForPayload),
+      payload: JSON.stringify(canonicalOrder),
+    };
+
     try {
-      await db.collection('customers').doc(customerResult.id).set(
-        {
-          lastOrderAt: Timestamp.now(),
-          lastOrderId: newOrderRef.id,
-          phone: isObject(customerPayload) ? (customerPayload['phone'] ?? customerPayload['Number'] ?? null) : null,
-          agentId: agentResult.id ?? null,
-        },
-        { merge: true }
-      );
-    } catch (metaErr) {
-      console.warn('Failed to update customer metadata:', metaErr);
+      await insertRowToBigQuery(BQ_PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID, row);
+    } catch (insertErr: unknown) {
+      console.error('BigQuery insert error (detailed):', (insertErr as any)?.bigQueryDetails ?? insertErr);
+      return NextResponse.json({
+        ok: false,
+        message: 'BigQuery insert failed',
+        bigQueryError: (insertErr as any)?.bigQueryDetails ?? String(insertErr),
+        canonicalOrder,
+      }, { status: 500 });
     }
 
-    if (agentResult.id) {
-      try {
-        await db.collection('agents').doc(agentResult.id).set(
-          {
-            lastAssignedOrderAt: Timestamp.now(),
-          },
-          { merge: true }
-        );
-      } catch (metaErr) {
-        console.warn('Failed to update agent metadata:', metaErr);
-      }
-    }
-
-    return NextResponse.json(
-      {
-        ok: true,
-        message: 'Order created successfully',
-        orderId: newOrderRef.id,
-        createdCustomerId: customerResult.created ? customerResult.id : undefined,
-        createdAgentId: agentResult.created ? agentResult.id : undefined,
-      },
-      { status: 201 }
-    );
-  } catch (error: unknown) {
-    console.error('Error creating order:', error);
-    const msg = error instanceof Error ? error.message : String(error);
-    return NextResponse.json({ ok: false, message: `Internal Server Error: ${msg}` }, { status: 500 });
+    return NextResponse.json({ ok: true, orderId, inserted: 1 }, { status: 201 });
+  } catch (err: unknown) {
+    console.error('POST /api/orders error:', err);
+    const msg = err instanceof Error ? (err as any).message : String(err);
+    return NextResponse.json({ ok: false, message: msg }, { status: 500 });
   }
 }
 
-/** PATCH /api/orders?id=ORDER_ID - update order fields (we allow updating orderStatus) */
+/** =========================
+ *  PATCH: update orderStatus (BigQuery DML)
+ *  ========================= */
 export async function PATCH(req: Request): Promise<NextResponse> {
   try {
-    const url = new URL(req.url);
-    const id = url.searchParams.get('id');
+    const body = (await req.json().catch(() => null)) as unknown;
+    if (!isObject(body)) return NextResponse.json({ ok: false, message: 'Bad Request: invalid JSON body' }, { status: 400 });
 
-    if (!id) {
-      return NextResponse.json({ ok: false, message: 'Missing id query parameter' }, { status: 400 });
-    }
+    const id = safeString(body['id']);
+    const newStatus = safeString(body['orderStatus'] ?? body['status'] ?? '');
 
-    // Read JSON once and handle parse errors
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch (parseErr) {
-      return NextResponse.json({ ok: false, message: 'Bad Request: invalid JSON body' }, { status: 400 });
-    }
+    if (!id || !newStatus) return NextResponse.json({ ok: false, message: 'Missing id or orderStatus' }, { status: 400 });
 
-    if (!isObject(body)) {
-      return NextResponse.json({ ok: false, message: 'Bad Request: invalid JSON body' }, { status: 400 });
-    }
+    await ensureDatasetExists(BQ_PROJECT_ID, BQ_DATASET_ID);
+    await ensureTableExists(BQ_PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID);
 
-    // Only allow updating specific safe fields for now:
-    const updates: Record<string, unknown> = {};
-    if (Object.prototype.hasOwnProperty.call(body, 'orderStatus')) {
-      const rawStatus = (body as Record<string, unknown>)['orderStatus'];
-      const s = safeString(rawStatus);
-      updates.orderStatus = s || 'Unconfirmed';
-    }
+    const fullTable = `\`${BQ_PROJECT_ID}.${BQ_DATASET_ID}.${BQ_TABLE_ID}\``;
+    const sql = `UPDATE ${fullTable} SET orderStatus = @status WHERE id = @id`;
+    const options = {
+      query: sql,
+      params: { id, status: newStatus },
+      location: 'US',
+    };
+    await bigquery.query(options);
 
-    if (Object.keys(updates).length === 0) {
-      return NextResponse.json({ ok: false, message: 'No updatable fields provided' }, { status: 400 });
-    }
-
-    const docRef = db.collection('orders').doc(id);
-    const snap = await docRef.get();
-    if (!snap.exists) {
-      return NextResponse.json({ ok: false, message: 'Order not found' }, { status: 404 });
-    }
-
-    await docRef.set(updates, { merge: true });
-
-    return NextResponse.json({ ok: true, id, updated: updates }, { status: 200 });
+    return NextResponse.json({ ok: true, id, orderStatus: newStatus }, { status: 200 });
   } catch (err: unknown) {
-    console.error('Failed to PATCH order:', err);
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ ok: false, message: `Internal Server Error: ${msg}` }, { status: 500 });
+    console.error('PATCH /api/orders error:', err);
+    const msg = err instanceof Error ? (err as any).message : String(err);
+    return NextResponse.json({ ok: false, message: msg }, { status: 500 });
   }
 }
 
-
-/** DELETE /api/orders?id=ORDER_ID - original delete route (keeps existing behavior if you still want it) */
+/** =========================
+ *  DELETE: *soft-delete* — mark as Cancelled (preferred)
+ *  If you prefer real DELETE, see commented SQL below.
+ *  ========================= */
 export async function DELETE(req: Request): Promise<NextResponse> {
   try {
     const url = new URL(req.url);
-    const id = url.searchParams.get('id');
+    const id = url.searchParams.get('id') ?? '';
+    const cancelledBy = url.searchParams.get('cancelledBy') ?? '';
 
-    if (!id) {
-      return NextResponse.json({ ok: false, message: 'Missing id query parameter' }, { status: 400 });
-    }
+    if (!id) return NextResponse.json({ ok: false, message: 'Missing id query parameter' }, { status: 400 });
 
-    const docRef = db.collection('orders').doc(id);
-    const snap = await docRef.get();
-    if (!snap.exists) {
-      return NextResponse.json({ ok: false, message: 'Order not found' }, { status: 404 });
-    }
+    await ensureDatasetExists(BQ_PROJECT_ID, BQ_DATASET_ID);
+    await ensureTableExists(BQ_PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID);
 
-    await docRef.delete();
+    const fullTable = `\`${BQ_PROJECT_ID}.${BQ_DATASET_ID}.${BQ_TABLE_ID}\``;
 
-    // best-effort cleanup (same as before)
-    try {
-      const data = snap.data() ?? {};
-      const custId = (data.customer && data.customer.id) || null;
-      const agentId = (data.agent && data.agent.id) || null;
+    // Soft-delete: update status and set cancelledAt/cancelledBy
+    const sql = `UPDATE ${fullTable}
+                 SET orderStatus = 'Cancelled',
+                     cancelledAt = CURRENT_TIMESTAMP(),
+                     cancelledBy = @cancelledBy
+                 WHERE id = @id`;
+    await bigquery.query({
+      query: sql,
+      params: { id, cancelledBy },
+      location: 'US',
+    });
 
-      if (custId) {
-        const custRef = db.collection('customers').doc(String(custId));
-        await db.runTransaction(async (tx) => {
-          const c = await tx.get(custRef);
-          if (c.exists) {
-            const cdata = c.data() ?? {};
-            if (cdata.lastOrderId === id) {
-              tx.update(custRef, { lastOrderId: null, lastOrderAt: null });
-            }
-          }
-        });
-      }
-      if (agentId) {
-        const agentRef = db.collection('agents').doc(String(agentId));
-        await db.runTransaction(async (tx) => {
-          const a = await tx.get(agentRef);
-          if (a.exists) {
-            const adata = a.data() ?? {};
-            if (adata.lastAssignedOrderId === id) {
-              tx.update(agentRef, { lastAssignedOrderId: null, lastAssignedOrderAt: null });
-            }
-          }
-        });
-      }
-    } catch (cleanupErr) {
-      console.warn('Non-fatal cleanup error while deleting order:', cleanupErr);
-    }
+    // If you'd rather hard-delete, replace above with:
+    // const sqlDelete = `DELETE FROM ${fullTable} WHERE id = @id`;
+    // await bigquery.query({ query: sqlDelete, params: { id }, location: 'US' });
 
     return NextResponse.json({ ok: true, id }, { status: 200 });
   } catch (err: unknown) {
-    console.error('Failed to delete order:', err);
-    const msg = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ ok: false, message: `Internal Server Error: ${msg}` }, { status: 500 });
+    console.error('DELETE /api/orders error:', err);
+    const msg = err instanceof Error ? (err as any).message : String(err);
+    return NextResponse.json({ ok: false, message: msg }, { status: 500 });
   }
 }

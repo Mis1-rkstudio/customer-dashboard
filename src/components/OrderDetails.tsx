@@ -30,6 +30,15 @@ function formatDate(input: unknown): string {
       // fall through
     }
   }
+  // Firestore Timestamp-like with toDate()
+  if (isObject(input) && 'toDate' in (input as Record<string, unknown>) && typeof (input as any).toDate === 'function') {
+    try {
+      const d = (input as any).toDate();
+      if (d instanceof Date && !Number.isNaN(d.getTime())) return d.toLocaleString();
+    } catch {
+      // fall through
+    }
+  }
   try {
     const d = new Date(String(input));
     if (!isNaN(d.getTime())) return d.toLocaleString();
@@ -37,6 +46,14 @@ function formatDate(input: unknown): string {
   } catch {
     return String(input);
   }
+}
+
+function isSecondsObject(v: unknown): v is { seconds: number } {
+  return typeof v === 'object' && v !== null && 'seconds' in v && typeof (v as Record<string, unknown>)['seconds'] === 'number';
+}
+
+function hasToDate(v: unknown): v is { toDate: () => Date } {
+  return typeof v === 'object' && v !== null && 'toDate' in v && typeof (v as Record<string, unknown>)['toDate'] === 'function';
 }
 
 /* --- Types used in component --- */
@@ -52,6 +69,27 @@ type NormalizedOrder = {
 };
 
 /** Normalize an arbitrary order shape into a predictable object */
+/* --- Add this helper near the other helpers at top --- */
+function extractCreatedAtFromOrder(orderRec: Record<string, unknown>): unknown {
+  // Common shapes: ISO string, { value: '2025-..' }, Firestore { seconds: ... }, timestamp object with toDate()
+  const v = orderRec['createdAt'] ?? orderRec['created_at'] ?? orderRec['placedAt'] ?? orderRec['Placed'] ?? orderRec['createdDate'] ?? null;
+  if (!v) return null;
+
+  if (isObject(v)) {
+    // nested value string e.g. { value: "2025-09-03T10:11:32.500Z" }
+    if ('value' in v && typeof (v as any).value === 'string') return (v as any).value;
+    // Firestore seconds object
+    if ('seconds' in v && typeof (v as any).seconds === 'number') return v;
+    // timestamp-like with toDate()
+    if ('toDate' in v && typeof (v as any).toDate === 'function') {
+      try { return (v as any).toDate(); } catch { /* fall through */ }
+    }
+  }
+
+  return v;
+}
+
+/** Normalize an arbitrary order shape into a predictable object (REPLACEMENT) */
 function normalizeOrder(order: unknown): NormalizedOrder {
   if (!isObject(order)) {
     return {
@@ -64,51 +102,59 @@ function normalizeOrder(order: unknown): NormalizedOrder {
     };
   }
 
-  const customerField = isObject(order['customer']) ? (order['customer'] as Record<string, unknown>) : undefined;
-  const agentField = isObject(order['agent']) ? (order['agent'] as Record<string, unknown>) : undefined;
+  // If a wrapper record like { id, payload, ... } and payload is present prefer the payload
+  if ('payload' in order) {
+    const rec = order as Record<string, unknown>;
+    if (typeof rec.payload === 'string' && rec.payload.trim()) {
+      try {
+        const parsed = JSON.parse(rec.payload);
+        if (isObject(parsed)) order = parsed;
+      } catch {
+        // ignore - we'll fall back to wrapper
+      }
+    } else if (isObject(rec.payload)) {
+      order = rec.payload as Record<string, unknown>;
+    }
+  }
+
+  const ord = order as Record<string, unknown>;
+  const customerField = isObject(ord['customer']) ? (ord['customer'] as Record<string, unknown>) : undefined;
+  const agentField = isObject(ord['agent']) ? (ord['agent'] as Record<string, unknown>) : undefined;
 
   const customerName = safeString(
-    order['customerName'] ??
-    customerField?.name ??
-    customerField?.label ??
-    customerField?.Company_Name ??
-    ''
+    ord['customerName'] ?? customerField?.name ?? customerField?.label ?? customerField?.Company_Name ?? ''
   );
-  const customerEmail = safeString(order['customerEmail'] ?? customerField?.email ?? '');
+  const customerEmail = safeString(ord['customerEmail'] ?? customerField?.email ?? '');
   const customerPhone = safeString(
-    order['customerPhone'] ??
-    customerField?.phone ??
-    customerField?.phoneNumber ??
-    customerField?.Number ??
-    ''
+    ord['customerPhone'] ?? customerField?.phone ?? customerField?.phoneNumber ?? customerField?.Number ?? ''
   );
 
-  const agentName = safeString(order['agentName'] ?? agentField?.name ?? agentField?.label ?? '');
-  const agentEmail = safeString(order['agentEmail'] ?? agentField?.email ?? '');
+  const agentName = safeString(ord['agentName'] ?? agentField?.name ?? agentField?.label ?? '');
+  const agentEmail = safeString(ord['agentEmail'] ?? agentField?.email ?? '');
   const agentPhone = safeString(
-    order['agentPhone'] ??
-    agentField?.number ??
-    agentField?.phone ??
-    agentField?.Contact_Number ??
-    ''
+    ord['agentPhone'] ?? agentField?.number ?? agentField?.phone ?? agentField?.Contact_Number ?? ''
   );
 
-  // itemsRaw could be grouped ({ itemName, colors: [{ color, sets }] }) or flat rows
-  const itemsRaw = Array.isArray(order['items'])
-    ? (order['items'] as unknown[])
-    : Array.isArray(order['rows'])
-      ? (order['rows'] as unknown[])
-      : [];
+  // Accept items, rows or itemsFlat
+  const itemsRaw = Array.isArray(ord['items'])
+    ? (ord['items'] as unknown[])
+    : Array.isArray(ord['rows'])
+      ? (ord['rows'] as unknown[])
+      : Array.isArray(ord['itemsFlat'])
+        ? (ord['itemsFlat'] as unknown[])
+        : [];
 
   const itemsFlat: FlatItem[] = [];
 
   if (Array.isArray(itemsRaw) && itemsRaw.length > 0) {
     const first = itemsRaw[0];
-    // grouped form
+
+    // Grouped form: item has colors[] (colors may be objects or primitive strings)
     if (isObject(first) && Array.isArray((first as Record<string, unknown>)['colors'])) {
       for (const it of itemsRaw) {
         if (!isObject(it)) continue;
         const itemObj = it as Record<string, unknown>;
+
         const itemName = safeString(
           itemObj['itemName'] ??
           itemObj['Item'] ??
@@ -118,25 +164,32 @@ function normalizeOrder(order: unknown): NormalizedOrder {
           itemObj['name'] ??
           ''
         );
+
+        // top-level sets on the item (applies to each color if colors are primitives)
+        const itemLevelSets = safeNumber(itemObj['sets'] ?? itemObj['set'] ?? 0);
+
         const colors = Array.isArray(itemObj['colors']) ? (itemObj['colors'] as unknown[]) : [];
+
         for (const c of colors) {
           if (isObject(c)) {
             const cObj = c as Record<string, unknown>;
-            const color = safeString(cObj['color'] ?? cObj['colorName'] ?? cObj['value'] ?? '');
-            const sets = safeNumber(cObj['sets'] ?? cObj['set'] ?? cObj['qty'] ?? cObj['quantity'] ?? 0);
+            const color = safeString(cObj['color'] ?? cObj['colorName'] ?? cObj['value'] ?? cObj['label'] ?? '');
+            const sets = safeNumber(cObj['sets'] ?? cObj['set'] ?? cObj['qty'] ?? cObj['quantity'] ?? itemLevelSets);
             itemsFlat.push({ itemName, color, quantity: sets });
           } else {
-            // c may be primitive color string
+            // primitive color string; use item-level sets if present
             const color = safeString(c);
-            itemsFlat.push({ itemName, color, quantity: 0 });
+            const sets = itemLevelSets; // if 0, will be 0
+            itemsFlat.push({ itemName, color, quantity: sets });
           }
         }
       }
     } else {
-      // flat rows
+      // Flat rows: each row has itemName, color, quantity keys
       for (const it of itemsRaw) {
         if (!isObject(it)) continue;
         const itObj = it as Record<string, unknown>;
+
         const itemName = safeString(
           itObj['itemName'] ??
           (isObject(itObj['item']) ? (itObj['item'] as Record<string, unknown>)['label'] ?? (itObj['item'] as Record<string, unknown>)['Item'] ?? (itObj['item'] as Record<string, unknown>)['value'] : '') ??
@@ -147,14 +200,15 @@ function normalizeOrder(order: unknown): NormalizedOrder {
           itObj['name'] ??
           ''
         );
+
+        const colorPrimitive = isObject(itObj['color']) && safeString((itObj['color'] as Record<string, unknown>)['label'])
+          ? (itObj['color'] as Record<string, unknown>)['label']
+          : itObj['color'];
+
         const color =
-          safeString(
-            isObject(itObj['color']) && safeString((itObj['color'] as Record<string, unknown>)['label'])
-              ? (itObj['color'] as Record<string, unknown>)['label']
-              : itObj['color']
-          ) ??
-          safeString(itObj['colorName']) ??
-          safeString(itObj['colorValue']) ??
+          safeString(colorPrimitive) ||
+          safeString(itObj['colorName']) ||
+          safeString(itObj['colorValue']) ||
           '';
 
         const qty = safeNumber(itObj['quantity'] ?? itObj['qty'] ?? itObj['sets'] ?? itObj['set'] ?? 0);
@@ -163,15 +217,18 @@ function normalizeOrder(order: unknown): NormalizedOrder {
     }
   }
 
+  const createdAt = extractCreatedAtFromOrder(ord);
+
   return {
     customer: { name: customerName, email: customerEmail, phone: customerPhone },
     agent: { name: agentName, email: agentEmail, number: agentPhone },
     itemsFlat,
-    createdAt: order['createdAt'] ?? order['created_at'] ?? null,
-    source: safeString(order['source'] ?? 'web'),
+    createdAt,
+    source: safeString(ord['source'] ?? 'web'),
     raw: order,
   };
 }
+
 
 function aggregateItems(items: FlatItem[]): FlatItem[] {
   const map = new Map<string, FlatItem>();
@@ -200,46 +257,104 @@ export default function OrderDetails({ orderId }: { orderId: string }): JSX.Elem
     async function fetchOrder(): Promise<void> {
       setIsLoading(true);
       try {
-        const res = await fetch(`/api/orders/${orderId}`);
-        const text = await res.text().catch(() => '');
-        let data: unknown = null;
-        try {
-          data = text ? JSON.parse(text) : null;
-        } catch (e) {
-          // invalid JSON: we'll log and bail
-          console.warn('Order fetch: invalid JSON', { text, e });
-        }
+        const res = await fetch('/api/orders');
+        // parse JSON safely
+        const data = await res.json().catch(() => null);
 
         if (!res.ok) {
-          const msg =
-            (isObject(data) && (data as Record<string, unknown>)['message']) ??
-            text ??
-            `HTTP ${res.status}`;
-          console.error('Failed to fetch order:', msg);
-          if (!canceled) setOrderRaw(null);
-          return;
-        }
-
-        // Accept { ok:true, order } or raw order object
-        let payloadOrder: unknown = null;
-        if (isObject(data)) {
-          const dobj = data as Record<string, unknown>;
-          if (dobj['ok'] === true && dobj['order']) {
-            payloadOrder = dobj['order'];
-          } else if (dobj['ok'] === false) {
-            console.error('Server returned ok:false', dobj);
-            if (!canceled) setOrderRaw(null);
-            return;
-          } else {
-            payloadOrder = data;
+          console.error('Failed to fetch orders list:', { status: res.status, data });
+          if (!canceled) {
+            setOrderRaw(null);
           }
+          return;
+        }
+
+        // possible shapes:
+        // - an array of rows
+        // - { rows: [...] }
+        // - { orders: [...] }
+        // - single order object (rare)
+        let rows: unknown[] = [];
+        if (Array.isArray(data)) rows = data;
+        else if (isObject(data) && Array.isArray((data as Record<string, unknown>).rows)) rows = (data as Record<string, unknown>).rows as unknown[];
+        else if (isObject(data) && Array.isArray((data as Record<string, unknown>).orders)) rows = (data as Record<string, unknown>).orders as unknown[];
+        else if (isObject(data) && (data as Record<string, unknown>).order) {
+          // single order returned as { order: {...} }
+          rows = [(data as Record<string, unknown>).order as unknown];
+        } else if (isObject(data)) {
+          // Possibly the API returned a single order object directly (or wrapped with ok:true)
+          rows = [data];
         } else {
-          console.warn('Order fetch: no JSON body', { text });
+          rows = [];
+        }
+
+        // find candidate row by id or payload.id or payload.orderId etc.
+        const match = rows.find((r) => {
+          if (!isObject(r)) return false;
+          const rec = r as Record<string, unknown>;
+
+          // direct top-level id matches
+          const candidateIds = [
+            safeString(rec['id']),
+            safeString(rec['orderId']),
+            safeString(rec['order_id']),
+            safeString(rec['ID']),
+          ].filter(Boolean);
+
+          if (candidateIds.some((cid) => cid === orderId)) return true;
+
+          // check if payload exists (string or object)
+          if ('payload' in rec) {
+            const p = rec['payload'];
+            if (typeof p === 'string') {
+              try {
+                const parsed = JSON.parse(p);
+                if (isObject(parsed)) {
+                  const pid = safeString(parsed['id'] ?? parsed['orderId'] ?? parsed['order_id'] ?? parsed['ID'] ?? parsed['OrderID']);
+                  if (pid === orderId) return true;
+                }
+              } catch {
+                // ignore
+              }
+            } else if (isObject(p)) {
+              const pid = safeString((p as Record<string, unknown>)['id'] ?? (p as Record<string, unknown>)['orderId'] ?? (p as Record<string, unknown>)['order_id']);
+              if (pid === orderId) return true;
+            }
+          }
+
+          // last resort: check nested payload-like fields
+          const nestedId = safeString(rec['payload'] ?? rec['order'] ?? rec['orderPayload'] ?? '');
+          if (nestedId === orderId) return true;
+
+          return false;
+        });
+
+        if (!match) {
+          console.warn('Order not found in /api/orders response for id', orderId);
           if (!canceled) setOrderRaw(null);
           return;
         }
 
-        if (!canceled) setOrderRaw(payloadOrder);
+        // If matched record includes payload string, prefer parsed payload object for display
+        if (isObject(match)) {
+          const rec = match as Record<string, unknown>;
+          if (typeof rec.payload === 'string' && rec.payload.trim()) {
+            try {
+              const parsed = JSON.parse(rec.payload);
+              if (isObject(parsed)) {
+                if (!canceled) setOrderRaw(parsed);
+                return;
+              }
+            } catch {
+              // ignore parse error
+            }
+          } else if (isObject(rec.payload)) {
+            if (!canceled) setOrderRaw(rec.payload);
+            return;
+          }
+        }
+
+        if (!canceled) setOrderRaw(match);
       } catch (err) {
         console.error('Error fetching order:', err);
         if (!canceled) setOrderRaw(null);
@@ -270,46 +385,23 @@ export default function OrderDetails({ orderId }: { orderId: string }): JSX.Elem
   const agentEmail = normalized.agent.email || '—';
   const agentPhone = normalized.agent.number || '—';
 
-  /* --- add this helper near the other helpers at the top of the file --- */
-  function isSecondsObject(v: unknown): v is { seconds: number } {
-    return typeof v === 'object' && v !== null && 'seconds' in v && typeof (v as Record<string, unknown>)['seconds'] === 'number';
-  }
-
-  function hasToDate(v: unknown): v is { toDate: () => Date } {
-    return typeof v === 'object' && v !== null && 'toDate' in v && typeof (v as Record<string, unknown>)['toDate'] === 'function';
-  }
-
-  /* --- later, where you build orderForShare --- */
   const createdAtForShare: OrderShape['createdAt'] = (() => {
     const v = normalized.createdAt;
     if (v === null || v === undefined) return undefined;
 
-    // already acceptable primitives / Date
     if (typeof v === 'string' || typeof v === 'number') return v;
     if (v instanceof Date) return v;
-
-    // Firestore-style seconds object
     if (isSecondsObject(v)) return { seconds: Number((v as { seconds: number }).seconds) };
-
-    // Firestore Timestamp-like with toDate()
     if (hasToDate(v)) {
       try {
         const d = (v as { toDate: () => Date }).toDate();
         if (d instanceof Date && !Number.isNaN(d.getTime())) return d;
-      } catch {
-        /* ignore */
-      }
+      } catch { /* ignore */ }
     }
-
-    // final attempt: try parseable date -> return ISO string
     try {
       const parsed = new Date(String(v));
       if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
-    } catch {
-      /* ignore */
-    }
-
-    // fallback: undefined (matches union because createdAt is optional / can be undefined)
+    } catch { /* ignore */ }
     return undefined;
   })();
 
@@ -321,7 +413,6 @@ export default function OrderDetails({ orderId }: { orderId: string }): JSX.Elem
     createdAt: createdAtForShare,
     source: normalized.source,
   };
-
 
   return (
     <div className="p-4">
@@ -341,28 +432,16 @@ export default function OrderDetails({ orderId }: { orderId: string }): JSX.Elem
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
         <div>
           <h3 className="font-semibold text-lg mb-2">Customer Information</h3>
-          <p>
-            <strong>Name:</strong> {customerName}
-          </p>
-          <p>
-            <strong>Email:</strong> {customerEmail}
-          </p>
-          <p>
-            <strong>Phone:</strong> {customerPhone}
-          </p>
+          <p><strong>Name:</strong> {customerName}</p>
+          <p><strong>Email:</strong> {customerEmail}</p>
+          <p><strong>Phone:</strong> {customerPhone}</p>
         </div>
 
         <div>
           <h3 className="font-semibold text-lg mb-2">Agent Information</h3>
-          <p>
-            <strong>Name:</strong> {agentName}
-          </p>
-          <p>
-            <strong>Number:</strong> {agentPhone}
-          </p>
-          <p>
-            <strong>Email:</strong> {agentEmail}
-          </p>
+          <p><strong>Name:</strong> {agentName}</p>
+          <p><strong>Number:</strong> {agentPhone}</p>
+          <p><strong>Email:</strong> {agentEmail}</p>
         </div>
       </div>
 

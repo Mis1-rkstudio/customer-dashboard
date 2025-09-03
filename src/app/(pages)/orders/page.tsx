@@ -3,9 +3,11 @@
 import React, { JSX, useCallback, useEffect, useMemo, useState } from 'react';
 import { FaTimes, FaTrash, FaUndo } from 'react-icons/fa';
 import Modal from '../../../components/Modal';
-import OrderForm from '../../../components/OrderForm';
 import OrderDetails from '../../../components/OrderDetails';
 import ShareOrderIcon, { OrderShape } from '@/components/ShareOrder';
+import OrderForm from '@/components/OrderForm';
+
+/* ---------------------- small helpers ---------------------- */
 
 function formatDateMaybe(raw: unknown): string {
   if (!raw) return '—';
@@ -22,14 +24,27 @@ function formatDateMaybe(raw: unknown): string {
   }
 }
 
-/** small helper to detect Firestore-like { seconds: number } without using `any` */
 function isSecondsObject(v: unknown): v is { seconds: number } {
   return typeof v === 'object' && v !== null && 'seconds' in v && typeof (v as Record<string, unknown>).seconds === 'number';
 }
 
-/**
- * Normalized order shape used by the UI
- */
+function pluckString(obj: unknown, ...keys: string[]): string | undefined {
+  if (!obj || typeof obj !== 'object') return undefined;
+  const rec = obj as Record<string, unknown>;
+  for (const k of keys) {
+    const val = rec[k];
+    if (val !== undefined && val !== null) return String(val);
+  }
+  return undefined;
+}
+
+function safeString(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  return String(v).trim();
+}
+
+/* ---------------------- normalize ---------------------- */
+
 type NormalizedOrder = {
   id: string;
   customerName: string;
@@ -40,75 +55,66 @@ type NormalizedOrder = {
   items?: unknown[];
   totalQty: number;
   raw?: unknown;
-  orderStatus?: string; // normalized status (e.g. Confirmed / Unconfirmed / Cancelled)
+  orderStatus?: string;
 };
 
 function normalizeOrderShape(raw: unknown): NormalizedOrder {
   const r = (raw && typeof raw === 'object') ? (raw as Record<string, unknown>) : {};
 
-  // id candidates -> coerce to string
-  const id =
-    String(
-      r.id ??
-      r.orderId ??
-      r.OrderID ??
-      r.order_id ??
-      r.ID ??
-      ''
-    );
+  const id = String(
+    r.id ??
+    r.orderId ??
+    r.OrderID ??
+    r.order_id ??
+    r.ID ??
+    ''
+  );
 
   const customerField = r.customer;
-  const customerName =
-    String(
-      r.customerName ??
-      (customerField && typeof customerField === 'object' ? (customerField as Record<string, unknown>).name : undefined) ??
-      (customerField && typeof customerField === 'string' ? (customerField as string) : undefined) ??
-      ((r.customer as Record<string, unknown>)?.label) ??
-      ((r.customer as Record<string, unknown>)?.Company_Name) ??
-      ''
-    );
+  const customerName = String(
+    r.customerName ??
+    (customerField && typeof customerField === 'object' ? (customerField as Record<string, unknown>).name : undefined) ??
+    (customerField && typeof customerField === 'string' ? (customerField as string) : undefined) ??
+    ((r.customer as Record<string, unknown>)?.label) ??
+    ((r.customer as Record<string, unknown>)?.Company_Name) ??
+    ''
+  );
 
   const agentField = r.agent;
-  const agentName =
-    String(
-      r.agentName ??
-      (agentField && typeof agentField === 'object' ? (agentField as Record<string, unknown>).name : undefined) ??
-      (agentField && typeof agentField === 'string' ? (agentField as string) : undefined) ??
-      ((r.agent as Record<string, unknown>)?.label) ??
-      ((r.agent as Record<string, unknown>)?.Company_Name) ??
-      ''
-    );
+  const agentName = String(
+    r.agentName ??
+    (agentField && typeof agentField === 'object' ? (agentField as Record<string, unknown>).name : undefined) ??
+    (agentField && typeof agentField === 'string' ? (agentField as string) : undefined) ??
+    ((r.agent as Record<string, unknown>)?.label) ??
+    ((r.agent as Record<string, unknown>)?.Company_Name) ??
+    ''
+  );
 
   const createdAt = r.createdAt ?? r.created_at ?? r.placedAt ?? r.Placed ?? r.createdDate ?? '';
 
-  const customerPhone =
-    String(
-      r.customerPhone ??
-      (customerField && typeof customerField === 'object' ? ((customerField as Record<string, unknown>).phone as unknown) : undefined) ??
-      (customerField && typeof customerField === 'object' ? ((customerField as Record<string, unknown>).phoneNumber as unknown) : undefined) ??
-      (customerField && typeof customerField === 'object' ? ((customerField as Record<string, unknown>).Number as unknown) : undefined) ??
-      ''
-    );
+  const customerPhone = String(
+    r.customerPhone ??
+    (customerField && typeof customerField === 'object' ? ((customerField as Record<string, unknown>).phone as unknown) : undefined) ??
+    (customerField && typeof customerField === 'object' ? ((customerField as Record<string, unknown>).phoneNumber as unknown) : undefined) ??
+    (customerField && typeof customerField === 'object' ? ((customerField as Record<string, unknown>).Number as unknown) : undefined) ??
+    ''
+  );
 
-  const agentPhone =
-    String(
-      r.agentPhone ??
-      (agentField && typeof agentField === 'object' ? ((agentField as Record<string, unknown>).number as unknown) : undefined) ??
-      (agentField && typeof agentField === 'object' ? ((agentField as Record<string, unknown>).phone as unknown) : undefined) ??
-      (agentField && typeof agentField === 'object' ? ((agentField as Record<string, unknown>).Contact_Number as unknown) : undefined) ??
-      ''
-    );
+  const agentPhone = String(
+    r.agentPhone ??
+    (agentField && typeof agentField === 'object' ? ((agentField as Record<string, unknown>).number as unknown) : undefined) ??
+    (agentField && typeof agentField === 'object' ? ((agentField as Record<string, unknown>).phone as unknown) : undefined) ??
+    (agentField && typeof agentField === 'object' ? ((agentField as Record<string, unknown>).Contact_Number as unknown) : undefined) ??
+    ''
+  );
 
-  // items: support multiple legacy shapes
   const itemsCandidate = (r.items ?? r.rows ?? r.itemsFlat) as unknown;
   const items = Array.isArray(itemsCandidate) ? (itemsCandidate as unknown[]) : [];
 
-  // compute totalQty
   let totalQty = 0;
   if (Array.isArray(items) && items.length > 0) {
     const first = items[0];
     if (first && typeof first === 'object' && Array.isArray((first as Record<string, unknown>).colors)) {
-      // grouped by item with colors array containing sets
       for (const it of items) {
         if (!it || typeof it !== 'object') continue;
         const colors = (it as Record<string, unknown>).colors as unknown[];
@@ -120,7 +126,6 @@ function normalizeOrderShape(raw: unknown): NormalizedOrder {
         }
       }
     } else {
-      // flat rows with quantity/qty/sets
       for (const it of items) {
         if (!it || typeof it !== 'object') continue;
         const rec = it as Record<string, unknown>;
@@ -129,9 +134,7 @@ function normalizeOrderShape(raw: unknown): NormalizedOrder {
     }
   }
 
-  // normalize order status (support multiple possible field names)
-  const rawStatus = (r.orderStatus ?? r.status ?? r.OrderStatus ?? '') as unknown;
-  const orderStatus = rawStatus ? String(rawStatus).trim() : '';
+  const statusCandidate = (pluckString(r, 'orderStatus', 'order_status', 'status') ?? '').trim();
 
   return {
     id,
@@ -142,22 +145,26 @@ function normalizeOrderShape(raw: unknown): NormalizedOrder {
     createdAt,
     items,
     totalQty,
-    raw: r,
-    orderStatus: orderStatus || undefined,
+    raw,
+    orderStatus: statusCandidate || undefined,
   };
 }
+
+/* ---------------------- page component ---------------------- */
 
 export default function OrdersPage(): JSX.Element {
   const [orders, setOrders] = useState<NormalizedOrder[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [searchPills, setSearchPills] = useState<Array<{ field: string; value: string }>>([]);
-  const [isCreateModalOpen, setICreateModalOpen] = useState<boolean>(false);
   const [isDetailsModalOpen, setIsDetailsModalOpen] = useState<boolean>(false);
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string>('');
-  const [actionId, setActionId] = useState<string | null>(null); // id currently being updated (cancel/restore)
-  const [selectedTab, setSelectedTab] = useState<'active' | 'cancelled' | 'all'>('active');
+  const [actioningId, setActioningId] = useState<string | null>(null);
+  const [selectedTab, setSelectedTab] = useState<'all' | 'active' | 'cancelled'>('all');
+
+  // create modal + create handler
+  const [isCreateModalOpen, setICreateModalOpen] = useState<boolean>(false);
 
   const fetchOrders = useCallback(async (): Promise<void> => {
     setIsLoading(true);
@@ -168,7 +175,6 @@ export default function OrdersPage(): JSX.Element {
         const txt = await res.text().catch(() => '');
         throw new Error(txt || `HTTP ${res.status}`);
       }
-      // handle potential non-JSON safely
       const data = await res.json().catch(() => null);
 
       let rawList: unknown[] = [];
@@ -177,10 +183,24 @@ export default function OrdersPage(): JSX.Element {
       else if (data && typeof data === 'object' && Array.isArray((data as Record<string, unknown>).orders)) rawList = (data as Record<string, unknown>).orders as unknown[];
       else rawList = [];
 
-      const normalized = rawList.map((r) => normalizeOrderShape(r));
+      const normalized = rawList.map((r) => {
+        if (r && typeof r === 'object' && 'payload' in r) {
+          const rec = r as Record<string, unknown>;
+          const payload = rec.payload;
+          if (payload && typeof payload === 'object') {
+            const base = normalizeOrderShape(payload);
+            if (!base.id && rec.id) base.id = String(rec.id);
+            base.raw = rec;
+            return base;
+          }
+        }
+        const base2 = normalizeOrderShape(r);
+        (base2 as any).raw = r;
+        return base2;
+      });
+
       setOrders(normalized);
     } catch (err: unknown) {
-      // keep console message for debugging
       console.error('Failed to fetch orders:', err);
       setFetchError('Failed to fetch orders. See console for details.');
       setOrders([]);
@@ -227,9 +247,9 @@ export default function OrdersPage(): JSX.Element {
     setSelectedOrderId(null);
   };
 
-  const filteredOrders = useMemo(() => {
-    // apply search pills first
-    let result = orders.filter((order) =>
+  const filteredBySearch = useMemo(() => {
+    if (!searchPills || searchPills.length === 0) return orders;
+    return orders.filter((order) =>
       searchPills.every((pill) => {
         const { field, value } = pill;
         const v = String(value || '').toLowerCase();
@@ -248,64 +268,190 @@ export default function OrdersPage(): JSX.Element {
         }
       })
     );
+  }, [orders, searchPills]);
 
-    // then apply tab filter
-    if (selectedTab === 'active') {
-      result = result.filter((o) => {
-        const s = (o.orderStatus ?? '').toLowerCase();
-        return s !== 'cancelled' && s !== 'cancel'; // treat both variants as cancelled
-      });
-    } else if (selectedTab === 'cancelled') {
-      result = result.filter((o) => {
-        const s = (o.orderStatus ?? '').toLowerCase();
-        return s === 'cancelled' || s === 'cancel';
-      });
-    }
-    return result;
-  }, [orders, searchPills, selectedTab]);
+  const activeOrders = useMemo(() => filteredBySearch.filter((o) => {
+    const s = String(o.orderStatus ?? '').toLowerCase();
+    return s !== 'cancelled' && s !== 'canceled';
+  }), [filteredBySearch]);
 
-  // mark order status via PATCH call
-  const markOrderStatus = async (id: string, newStatus: string): Promise<void> => {
-    if (!id) return;
-    const friendly = String(newStatus);
-    // confirm if cancelling (for safety)
-    if (friendly.toLowerCase() === 'cancelled' || friendly.toLowerCase() === 'cancel') {
-      const ok = window.confirm('Are you sure you want to mark this order as Cancelled?');
-      if (!ok) return;
-    }
-    try {
-      setActionId(id);
-      const res = await fetch(`/api/orders?id=${encodeURIComponent(id)}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderStatus: friendly }),
-      });
-      if (!res.ok) {
-        const contentType = res.headers.get('content-type') ?? '';
-        let msg = `Failed to update order (${res.status})`;
-        if (contentType.includes('application/json')) {
-          const json = await res.json().catch(() => ({}));
-          msg = (json as Record<string, unknown>).message as string ?? msg;
-        } else {
-          const txt = await res.text().catch(() => '');
-          if (txt) msg = txt;
+  const cancelledOrders = useMemo(() => filteredBySearch.filter((o) => {
+    const s = String(o.orderStatus ?? '').toLowerCase();
+    return s === 'cancelled' || s === 'canceled';
+  }), [filteredBySearch]);
+
+  // viewOrders computed once
+  const viewOrders = useMemo(() => {
+    if (selectedTab === 'all') return filteredBySearch; // <-- was `orders`
+    if (selectedTab === 'active') return activeOrders;
+    return cancelledOrders;
+  }, [selectedTab, filteredBySearch, activeOrders, cancelledOrders]);
+
+
+  /* ---------------------- createOrder helper ---------------------- */
+
+  function preparePayloadForApi(orderData: unknown): Record<string, unknown> {
+    const rec = (orderData && typeof orderData === 'object') ? (orderData as Record<string, unknown>) : {};
+
+    const customerPayload = (() => {
+      const c = rec['customer'];
+      if (c && typeof c === 'object') {
+        return {
+          name: safeString((c as Record<string, unknown>).name ?? (c as Record<string, unknown>).label ?? (c as Record<string, unknown>).Company_Name ?? ''),
+          phone: safeString((c as Record<string, unknown>).phone ?? (c as Record<string, unknown>).Number ?? (c as Record<string, unknown>).phoneNumber ?? ''),
+          email: safeString((c as Record<string, unknown>).email ?? (c as Record<string, unknown>).Email ?? ''),
+        };
+      }
+      return {
+        name: safeString(rec['customerName'] ?? rec['customer'] ?? ''),
+        phone: safeString(rec['customerPhone'] ?? rec['customerNumber'] ?? rec['customer_mobile'] ?? ''),
+        email: safeString(rec['customerEmail'] ?? rec['customer_email'] ?? ''),
+      };
+    })();
+
+    const agentPayload = (() => {
+      const a = rec['agent'];
+      if (a && typeof a === 'object') {
+        return {
+          name: safeString((a as Record<string, unknown>).name ?? (a as Record<string, unknown>).label ?? ''),
+          phone: safeString((a as Record<string, unknown>).phone ?? (a as Record<string, unknown>).number ?? (a as Record<string, unknown>).Contact_Number ?? ''),
+        };
+      }
+      return {
+        name: safeString(rec['agentName'] ?? rec['agent'] ?? ''),
+        phone: safeString(rec['agentPhone'] ?? rec['agentNumber'] ?? ''),
+      };
+    })();
+
+    const rawItemsCandidate = rec['items'] ?? rec['rows'] ?? rec['itemsFlat'] ?? [];
+    const rawItems = Array.isArray(rawItemsCandidate) ? rawItemsCandidate as unknown[] : [];
+
+    const flatItems: Array<Record<string, unknown>> = [];
+
+    for (const it of rawItems) {
+      if (!it) continue;
+      if (typeof it === 'string') {
+        flatItems.push({ sku: '', itemName: it, color: '', quantity: 0 });
+        continue;
+      }
+      if (typeof it === 'object') {
+        const i = it as Record<string, unknown>;
+        const itemName = safeString(i['itemName'] ?? i['Item'] ?? i['label'] ?? i['skuLabel'] ?? i['name'] ?? i['labelName'] ?? '');
+        const sku = safeString(i['sku'] ?? i['itemId'] ?? i['id'] ?? '');
+
+        if (Array.isArray(i['colors']) && i['colors'].length > 0) {
+          for (const c of (i['colors'] as unknown[])) {
+            if (!c) continue;
+            if (typeof c === 'object') {
+              const cRec = c as Record<string, unknown>;
+              const colorName = safeString(cRec['color'] ?? cRec['colorName'] ?? cRec['name'] ?? cRec['value'] ?? cRec['label']);
+              const qty = Number(cRec['sets'] ?? cRec['set'] ?? cRec['qty'] ?? cRec['quantity'] ?? 0) || 0;
+              flatItems.push({ sku, itemName: itemName || sku, color: colorName, quantity: qty });
+            } else {
+              flatItems.push({ sku, itemName: itemName || sku, color: String(c), quantity: 0 });
+            }
+          }
+          continue;
         }
+
+        const qty = Number(i['quantity'] ?? i['qty'] ?? i['sets'] ?? i['set'] ?? 0) || 0;
+        const color = safeString(i['color'] ?? i['colorName'] ?? '');
+        if (qty > 0 || color || itemName || sku) {
+          flatItems.push({ sku, itemName: itemName || sku, color, quantity: qty });
+          continue;
+        }
+
+        flatItems.push({ sku, itemName: itemName || sku || JSON.stringify(i), color: safeString(i['color']), quantity: qty });
+      }
+    }
+
+    const itemsToSend = flatItems.length > 0 ? flatItems : [];
+    const orderStatus = safeString(rec['orderStatus'] ?? rec['status'] ?? rec['order_status'] ?? 'Unconfirmed');
+
+    return {
+      customer: customerPayload,
+      agent: agentPayload,
+      items: itemsToSend,
+      orderStatus,
+    };
+  }
+
+  const handleCreateOrder = useCallback(async (orderData: unknown) => {
+    try {
+      setFetchError('');
+      const payload = preparePayloadForApi(orderData);
+      const cust = payload.customer as Record<string, unknown>;
+      const items = Array.isArray(payload.items) ? payload.items : [];
+      if (!cust || !cust.name || items.length === 0) {
+        throw new Error('Invalid payload: customer name and at least one item are required.');
+      }
+
+      const res = await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const ct = res.headers.get('content-type') ?? '';
+      let body: unknown = null;
+      if (ct.includes('application/json')) body = await res.json().catch(() => null);
+      else body = await res.text().catch(() => null);
+
+      if (!res.ok) {
+        const msg = (body && typeof body === 'object' && (body as any).message) ? (body as any).message : String(body ?? `HTTP ${res.status}`);
         throw new Error(msg);
       }
-      // refresh orders to show updated status (server is source of truth)
+
       await fetchOrders();
-      // if details modal open for this order, close it to avoid stale view
-      if (selectedOrderId === id) {
-        handleDetailsClose();
-      }
+      setICreateModalOpen(false);
+      return body;
     } catch (err: unknown) {
-      console.error('Failed to mark order status:', err);
+      console.error('Failed to create order:', err);
       const message = err instanceof Error ? err.message : String(err);
-      setFetchError(`Failed to mark order: ${message}`);
+      setFetchError(`Failed to create order: ${message}`);
+      throw err;
+    }
+  }, [fetchOrders]);
+
+  /* ---------------------- update status ---------------------- */
+
+  const markOrderStatus = async (id: string, status: string): Promise<void> => {
+    if (!id) return;
+    const confirmMsg = status.toLowerCase() === 'cancelled'
+      ? 'Mark this order as Cancelled?'
+      : `Mark this order as ${status}?`;
+
+    if (!window.confirm(confirmMsg)) return;
+
+    setActioningId(id);
+    try {
+      const res = await fetch('/api/orders', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, orderStatus: status }),
+      });
+
+      const ct = res.headers.get('content-type') ?? '';
+      let body: unknown = null;
+      if (ct.includes('application/json')) body = await res.json().catch(() => null);
+      else body = await res.text().catch(() => null);
+
+      if (!res.ok) {
+        const msg = (body && typeof body === 'object' && (body as any).message) ? (body as any).message : String(body ?? `HTTP ${res.status}`);
+        throw new Error(msg);
+      }
+
+      await fetchOrders();
+    } catch (err: unknown) {
+      console.error(`Failed to mark order as ${status}:`, err);
+      const message = err instanceof Error ? err.message : String(err);
+      setFetchError(`Failed to mark order as ${status}: ${message}`);
     } finally {
-      setActionId(null);
+      setActioningId(null);
     }
   };
+
+  /* ---------------------- render ---------------------- */
 
   return (
     <div className="w-full max-w-6xl mx-auto px-4">
@@ -329,11 +475,12 @@ export default function OrdersPage(): JSX.Element {
       <div className="mb-4">
         <input
           type="text"
-          placeholder='Search: use "customer: name", "agent: name", "id: <id>" or press Enter for quick customer search'
+          placeholder={'Search: use "customer: name", "agent: name", "id: <id>" or press Enter for quick customer search'}
           value={searchQuery}
           onChange={handleSearchChange}
           onKeyDown={handleSearchKeyDown}
           className="appearance-none block w-full bg-gray-800 text-gray-300 border border-gray-700 rounded py-3 px-4 leading-tight focus:outline-none focus:bg-gray-700"
+          aria-label="Search orders"
         />
         <div className="flex flex-wrap items-center mt-2">
           {searchPills.map((pill, index) => (
@@ -341,14 +488,9 @@ export default function OrdersPage(): JSX.Element {
               key={`${pill.field}:${pill.value}:${index}`}
               className="bg-gray-700 text-gray-300 rounded-full px-3 py-1 text-sm font-semibold mr-2 mb-2 flex items-center"
             >
-              <span>
-                {pill.field}: "{pill.value}"
-              </span>
+              <span>{`${pill.field}: "${pill.value}"`}</span>
               <button
-                onClick={(ev) => {
-                  ev.stopPropagation();
-                  removePill(index);
-                }}
+                onClick={(ev) => { ev.stopPropagation(); removePill(index); }}
                 className="ml-2 text-red-500 hover:text-red-700"
                 aria-label={`Remove filter ${pill.field}: ${pill.value}`}
                 type="button"
@@ -362,28 +504,24 @@ export default function OrdersPage(): JSX.Element {
 
       {fetchError && <div className="text-red-400 mb-4">{fetchError}</div>}
 
-      {/* Tabs: Active / Cancelled / All */}
-      <div className="flex items-center gap-2 mb-6">
+      <div className="flex gap-3 items-center mb-4">
         <button
-          onClick={() => setSelectedTab('active')}
-          className={`px-3 py-1 rounded ${selectedTab === 'active' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300'}`}
-          type="button"
-        >
-          Active ({orders.filter((o) => !((o.orderStatus ?? '').toLowerCase().includes('cancel'))).length})
-        </button>
-        <button
-          onClick={() => setSelectedTab('cancelled')}
-          className={`px-3 py-1 rounded ${selectedTab === 'cancelled' ? 'bg-red-600 text-white' : 'bg-gray-700 text-gray-300'}`}
-          type="button"
-        >
-          Cancelled ({orders.filter((o) => ((o.orderStatus ?? '').toLowerCase().includes('cancel'))).length})
-        </button>
-        <button
+          className={`px-3 py-1 rounded ${selectedTab === 'all' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300'}`}
           onClick={() => setSelectedTab('all')}
-          className={`px-3 py-1 rounded ${selectedTab === 'all' ? 'bg-gray-600 text-white' : 'bg-gray-700 text-gray-300'}`}
-          type="button"
         >
           All ({orders.length})
+        </button>
+        <button
+          className={`px-3 py-1 rounded ${selectedTab === 'active' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300'}`}
+          onClick={() => setSelectedTab('active')}
+        >
+          Active ({activeOrders.length})
+        </button>
+        <button
+          className={`px-3 py-1 rounded ${selectedTab === 'cancelled' ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-300'}`}
+          onClick={() => setSelectedTab('cancelled')}
+        >
+          Cancelled ({cancelledOrders.length})
         </button>
       </div>
 
@@ -391,199 +529,190 @@ export default function OrdersPage(): JSX.Element {
         <div className="text-center py-10">
           <p>Loading orders...</p>
         </div>
-      ) : filteredOrders.length === 0 ? (
-        <div className="text-center py-10">
-          <p>No orders found.</p>
-        </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-          {filteredOrders.map((order) => {
-            // prepare flat items for ShareOrderIcon (safely)
-            type ShareItem = { itemName: string; color: string; quantity: number };
-            const itemsForShare: ShareItem[] = [];
+        <>
+          {viewOrders.length === 0 ? (
+            <div className="text-center py-10">
+              <p>No orders found.</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+              {viewOrders.map((order) => {
+                type ShareItem = { itemName: string; color: string; quantity: number };
+                const itemsForShare: ShareItem[] = [];
 
-            if (Array.isArray(order.items) && order.items.length > 0) {
-              const first = order.items[0];
-              if (first && typeof first === 'object' && Array.isArray((first as Record<string, unknown>).colors)) {
-                for (const it of order.items as unknown[]) {
-                  if (!it || typeof it !== 'object') continue;
-                  const itRec = it as Record<string, unknown>;
-                  const itemName = String(itRec.itemName ?? itRec.Item ?? itRec.sku ?? itRec.label ?? '');
-                  const colors = Array.isArray(itRec.colors) ? itRec.colors : [];
-                  for (const c of colors) {
-                    if (!c) continue;
-                    if (typeof c === 'object') {
-                      const cRec = c as Record<string, unknown>;
+                if (Array.isArray(order.items) && order.items.length > 0) {
+                  const first = order.items[0];
+                  if (first && typeof first === 'object' && Array.isArray((first as Record<string, unknown>).colors)) {
+                    for (const it of order.items as unknown[]) {
+                      if (!it || typeof it !== 'object') continue;
+                      const itRec = it as Record<string, unknown>;
+                      const itemName = String(itRec.itemName ?? itRec.Item ?? itRec.sku ?? itRec.label ?? '');
+                      const colors = Array.isArray(itRec.colors) ? itRec.colors : [];
+                      for (const c of colors) {
+                        if (!c) continue;
+                        if (typeof c === 'object') {
+                          const cRec = c as Record<string, unknown>;
+                          itemsForShare.push({
+                            itemName,
+                            color: String(cRec.color ?? cRec.colorName ?? ''),
+                            quantity: Number(cRec.sets ?? cRec.set ?? cRec.qty ?? cRec.quantity ?? 0) || 0,
+                          });
+                        } else {
+                          itemsForShare.push({ itemName, color: String(c ?? ''), quantity: 0 });
+                        }
+                      }
+                    }
+                  } else {
+                    for (const it of order.items as unknown[]) {
+                      if (!it || typeof it !== 'object') continue;
+                      const itRec = it as Record<string, unknown>;
                       itemsForShare.push({
-                        itemName,
-                        color: String(cRec.color ?? cRec.colorName ?? ''),
-                        quantity: Number(cRec.sets ?? cRec.set ?? cRec.qty ?? cRec.quantity ?? 0) || 0,
+                        itemName: String(itRec.itemName ?? itRec.sku ?? itRec.label ?? ''),
+                        color: String(itRec.color ?? itRec.colorName ?? ''),
+                        quantity: Number(itRec.quantity ?? itRec.qty ?? itRec.sets ?? 0) || 0,
                       });
-                    } else {
-                      itemsForShare.push({ itemName, color: String(c ?? ''), quantity: 0 });
                     }
                   }
                 }
-              } else {
-                for (const it of order.items as unknown[]) {
-                  if (!it || typeof it !== 'object') continue;
-                  const itRec = it as Record<string, unknown>;
-                  itemsForShare.push({
-                    itemName: String(itRec.itemName ?? itRec.sku ?? itRec.label ?? ''),
-                    color: String(itRec.color ?? itRec.colorName ?? ''),
-                    quantity: Number(itRec.quantity ?? itRec.qty ?? itRec.sets ?? 0) || 0,
-                  });
-                }
-              }
-            }
 
-            const createdAtForShare: OrderShape['createdAt'] = (() => {
-              const v = order.createdAt;
-              if (v === null || v === undefined) return undefined;
+                const createdAtForShare: OrderShape['createdAt'] = (() => {
+                  const v = order.createdAt;
+                  if (v === null || v === undefined) return undefined;
 
-              if (typeof v === 'string' || typeof v === 'number') return v;
-              if (v instanceof Date) return v;
-              if (isSecondsObject(v)) return { seconds: Number(v.seconds) };
-              // fallback: try to parse to ISO string (safe)
-              try {
-                const parsed = new Date(String(v));
-                if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
-              } catch {
-                /* ignore */
-              }
-              // final fallback — return undefined so it matches the union
-              return undefined;
-            })();
+                  if (typeof v === 'string' || typeof v === 'number') return v;
+                  if (v instanceof Date) return v;
+                  if (isSecondsObject(v)) return { seconds: Number(v.seconds) };
+                  try {
+                    const parsed = new Date(String(v));
+                    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+                  } catch { }
+                  return undefined;
+                })();
 
-            const orderForShare: OrderShape = {
-              id: order.id,
-              customer: { name: order.customerName || '', phone: order.customerPhone || '', email: '' },
-              agent: { name: order.agentName || '', number: order.agentPhone || '', email: '' },
-              items: itemsForShare,
-              createdAt: createdAtForShare,
-              source:
-                (order.raw && typeof order.raw === 'object' ? ((order.raw as Record<string, unknown>).source as string | undefined) : undefined) ??
-                'web',
-            };
+                const orderForShare: OrderShape = {
+                  id: order.id,
+                  customer: { name: order.customerName || '', phone: order.customerPhone || '', email: '' },
+                  agent: { name: order.agentName || '', number: order.agentPhone || '', email: '' },
+                  items: itemsForShare,
+                  createdAt: createdAtForShare,
+                  source:
+                    (order.raw && typeof order.raw === 'object' ? ((order.raw as Record<string, unknown>).source as string | undefined) : undefined) ??
+                    'web',
+                };
 
-            const status = (order.orderStatus ?? '').toLowerCase();
-            const isCancelled = status === 'cancelled' || status === 'cancel';
+                const isCancelled = ((order.orderStatus ?? '').toLowerCase() === 'cancelled' || (order.orderStatus ?? '').toLowerCase() === 'canceled');
 
-            return (
-              <div
-                key={order.id}
-                role="button"
-                tabIndex={0}
-                onClick={() => handleCardClick(order.id)}
-                onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleCardClick(order.id); }}
-                className={`relative rounded-lg shadow-md transition-shadow duration-300 ease-in-out p-6 pr-14 sm:pr-16 cursor-pointer focus:outline-none focus:ring-2 ${isCancelled ? 'bg-gray-800/80 opacity-70' : 'bg-gray-800 hover:shadow-lg'
-                  }`}
-              >
-                {/* top-right controls: share and cancel/restore */}
-                <div className="absolute top-3 right-3 z-20 flex items-center gap-2" onClick={(ev) => ev.stopPropagation()}>
+                return (
                   <div
-                    className="inline-block"
-                    onClick={(ev) => ev.stopPropagation()}
-                    onKeyDown={(ev) => ev.stopPropagation()}
+                    key={order.id}
                     role="button"
                     tabIndex={0}
-                    aria-label="Share order"
+                    onClick={() => handleCardClick(order.id)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleCardClick(order.id); }}
+                    className={`relative rounded-lg transition-shadow duration-300 ease-in-out p-6 cursor-pointer focus:outline-none focus:ring-2 ${isCancelled ? 'bg-gray-800/60 opacity-80' : 'bg-gray-800 hover:shadow-lg'
+                      }`}
                   >
-                    <ShareOrderIcon order={orderForShare} phone={order.customerPhone ?? ''} />
-                  </div>
-
-                  {selectedTab === 'cancelled' ? (
-                    <button
-                      type="button"
-                      title="Restore order"
-                      aria-label={`Restore order ${order.id}`}
-                      onClick={async (ev) => {
-                        ev.stopPropagation();
-                        // restore to Unconfirmed by default (you can change logic to keep previous status)
-                        await markOrderStatus(order.id, 'Unconfirmed');
-                      }}
-                      className="p-2 rounded hover:bg-gray-700 focus:outline-none"
-                    >
-                      {actionId === order.id ? (
-                        <svg className="animate-spin h-4 w-4 text-green-400" viewBox="0 0 24 24" aria-hidden>
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-                        </svg>
-                      ) : (
-                        <FaUndo className="text-green-400" />
-                      )}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      title="Cancel order"
-                      aria-label={`Cancel order ${order.id}`}
-                      onClick={async (ev) => {
-                        ev.stopPropagation();
-                        await markOrderStatus(order.id, 'Cancelled');
-                      }}
-                      className="p-2 rounded hover:bg-gray-700 focus:outline-none"
-                    >
-                      {actionId === order.id ? (
-                        <svg className="animate-spin h-4 w-4 text-red-400" viewBox="0 0 24 24" aria-hidden>
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-                        </svg>
-                      ) : (
-                        <FaTrash className="text-red-400" />
-                      )}
-                    </button>
-                  )}
-                </div>
-
-                <div className="flex items-start">
-                  <div className="min-w-0">
-                    <h2 className={`text-lg font-bold ${isCancelled ? 'text-gray-300' : 'text-white'} truncate`}>{order.customerName || '—'}</h2>
-                    <p className="text-sm text-gray-400 truncate">{order.agentName || '—'}</p>
-                  </div>
-
-                  {/* status badge left top (if cancelled show red badge) */}
-                  <div className="ml-3">
-                    {isCancelled && (
-                      <div className="inline-flex items-center px-2 py-1 rounded text-xs font-semibold bg-red-700 text-white">
-                        Cancelled
+                    <div className="flex items-start justify-between">
+                      <div className="min-w-0 pr-3">
+                        <h2 className={`text-lg font-bold truncate ${isCancelled ? 'text-gray-300' : 'text-white'}`}>{order.customerName || '—'}</h2>
+                        <p className="text-sm text-gray-400 truncate">{order.agentName || '—'}</p>
                       </div>
-                    )}
-                    {!isCancelled && (order.orderStatus ? (
-                      <div className="inline-flex items-center px-2 py-1 rounded text-xs font-semibold bg-green-700 text-white">
-                        {order.orderStatus}
+
+                      <div className="flex items-start gap-2">
+                        {isCancelled ? (
+                          <div className="inline-flex items-center px-2 py-1 rounded text-xs font-semibold bg-red-700 text-white mr-2">
+                            Cancelled
+                          </div>
+                        ) : order.orderStatus ? (
+                          <div className="inline-flex items-center px-2 py-1 rounded text-xs font-semibold bg-green-700 text-white mr-2">
+                            {order.orderStatus}
+                          </div>
+                        ) : null}
+
+                        <div
+                          className="inline-block"
+                          onClick={(ev) => ev.stopPropagation()}
+                          onKeyDown={(ev) => ev.stopPropagation()}
+                          role="button"
+                          tabIndex={0}
+                          aria-label="Share order"
+                        >
+                          <ShareOrderIcon order={orderForShare} phone={order.customerPhone ?? ''} />
+                        </div>
+
+                        {isCancelled ? (
+                          <button
+                            type="button"
+                            title="Restore order"
+                            aria-label={`Restore order ${order.id}`}
+                            onClick={(ev) => { ev.stopPropagation(); void markOrderStatus(order.id, 'Unconfirmed'); }}
+                            className="p-2 rounded hover:bg-gray-700 focus:outline-none"
+                          >
+                            {actioningId === order.id ? (
+                              <svg className="animate-spin h-4 w-4 text-green-400" viewBox="0 0 24 24" aria-hidden>
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" />
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                              </svg>
+                            ) : (
+                              <FaUndo className="text-green-400" />
+                            )}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            title="Cancel order"
+                            aria-label={`Cancel order ${order.id}`}
+                            onClick={(ev) => { ev.stopPropagation(); void markOrderStatus(order.id, 'Cancelled'); }}
+                            className="p-2 rounded hover:bg-gray-700 focus:outline-none"
+                          >
+                            {actioningId === order.id ? (
+                              <svg className="animate-spin h-4 w-4 text-red-400" viewBox="0 0 24 24" aria-hidden>
+                                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" />
+                                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
+                              </svg>
+                            ) : (
+                              <FaTrash className="text-red-400" />
+                            )}
+                          </button>
+                        )}
                       </div>
-                    ) : null)}
-                  </div>
-                </div>
+                    </div>
 
-                <div className="mt-4">
-                  <p className="text-sm text-gray-300">
-                    <span className="font-semibold">Order ID:</span> {order.id || '—'}
-                  </p>
-                  <p className="text-sm text-gray-300">
-                    <span className="font-semibold">Date:</span> {formatDateMaybe(order.createdAt)}
-                  </p>
-                </div>
+                    <div className="mt-4">
+                      <p className="text-sm text-gray-300">
+                        <span className="font-semibold">Order ID:</span> {order.id || '—'}
+                      </p>
+                      <p className="text-sm text-gray-300">
+                        <span className="font-semibold">Date:</span> {formatDateMaybe(order.createdAt)}
+                      </p>
+                    </div>
 
-                {/* sets badge bottom-right */}
-                <div className="absolute bottom-3 right-3 z-10">
-                  <div className="inline-flex items-center justify-center rounded-md bg-gray-900/70 px-3 py-1 text-sm font-medium text-gray-100">
-                    {order.totalQty ?? 0} sets
+                    <div className="absolute bottom-3 right-3 z-10">
+                      <div className="inline-flex items-center justify-center rounded-md bg-gray-900/70 px-3 py-1 text-sm font-medium text-gray-100">
+                        {order.totalQty ?? 0} sets
+                      </div>
+                    </div>
                   </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
 
-      <Modal isOpen={isCreateModalOpen} onClose={() => setICreateModalOpen(false)}>
-        <OrderForm closeModal={() => setICreateModalOpen(false)} refreshOrders={fetchOrders} />
-      </Modal>
-
+      {/* Details modal */}
       <Modal isOpen={isDetailsModalOpen} onClose={handleDetailsClose}>
         {selectedOrderId ? <OrderDetails orderId={selectedOrderId} /> : <div className="p-6">Loading...</div>}
+      </Modal>
+
+      {/* Create modal: open OrderForm (OrderForm should call createOrder prop if present) */}
+      <Modal isOpen={isCreateModalOpen} onClose={() => setICreateModalOpen(false)}>
+        <OrderForm
+          closeModal={() => setICreateModalOpen(false)}
+          refreshOrders={fetchOrders}
+          createOrder={handleCreateOrder as unknown as ((data: unknown) => Promise<unknown>)}
+        />
       </Modal>
     </div>
   );

@@ -38,10 +38,10 @@ const bq = makeBQ();
 
 export async function GET() {
   try {
-    const project   = process.env.BQ_PROJECT!;
-    const dataset   = process.env.BQ_DATASET!;
+    const project = process.env.BQ_PROJECT!;
+    const dataset = process.env.BQ_DATASET!;
     const customers = process.env.BQ_CUSTOMERS_TABLE ?? 'kolkata_customer';
-    const brokers   = process.env.BQ_TABLE_AGENTS   ?? 'kolkata_broker';
+    const brokers = process.env.BQ_TABLE_AGENTS ?? 'kolkata_broker';
 
     if (!project || !dataset) {
       return NextResponse.json<ApiError>({ error: 'Missing BQ_PROJECT/BQ_DATASET' }, { status: 500 });
@@ -53,27 +53,57 @@ export async function GET() {
     const sql = `
       WITH base AS (
         SELECT
-          c.Company_Name, c.Cust_Ved_Type, c.Area, c.City, c.State,
-          c.Outstanding, c.Type, c.Broker, c.Contact_Name, c.Number, c.Created_Date
+          c.Company_Name,
+          c.Cust_Ved_Type,
+          c.Number,
+          c.Area,
+          c.City,
+          c.State,
+          c.Outstanding,
+          c.Type,
+          c.Broker,
+          c.Contact_Name,
+          c.Created_Date
         FROM ${C} c
-      ),
-      joined AS (
-        SELECT b.*, a.Broker_Name, a.Contact_Number
-        FROM base b
-        LEFT JOIN ${B} a
-          ON LOWER(TRIM(b.Company_Name)) = LOWER(TRIM(a.Company_Name))
       )
       SELECT
-        Company_Name, Cust_Ved_Type, Area, City, State, Outstanding, Type,
-        Broker, Contact_Name, Number, Created_Date,
-        COALESCE(NULLIF(TRIM(Broker), ''), NULLIF(STRING_AGG(DISTINCT Broker_Name, ', '), ''))   AS Agent_Name,
-        COALESCE(NULLIF(TRIM(Number), ''), NULLIF(STRING_AGG(DISTINCT Contact_Number, ', '), '')) AS Agent_Number
-      FROM joined
+        b.Company_Name,
+        b.Cust_Ved_Type,
+        b.Area,
+        b.City,
+        b.State,
+        b.Outstanding,
+        b.Type,
+        b.Broker,
+        b.Contact_Name,
+        b.Number,
+        b.Created_Date,
+        COALESCE(
+          NULLIF(TRIM(b.Broker), ''),
+          NULLIF(STRING_AGG(DISTINCT a.Company_Name, ', '), '')
+        ) AS Agent_Name,
+        COALESCE(
+          NULLIF(TRIM(b.Number), ''),
+          NULLIF(STRING_AGG(DISTINCT a.Contact_Number, ', '), '')
+        ) AS Agent_Number
+      FROM base b
+      LEFT JOIN ${B} a
+        ON LOWER(TRIM(b.Broker)) = LOWER(TRIM(a.Company_Name))
       GROUP BY
-        Company_Name, Cust_Ved_Type, Area, City, State, Outstanding, Type,
-        Broker, Contact_Name, Number, Created_Date
-      ORDER BY Company_Name
+        b.Company_Name,
+        b.Cust_Ved_Type,
+        b.Area,
+        b.City,
+        b.State,
+        b.Outstanding,
+        b.Type,
+        b.Broker,
+        b.Contact_Name,
+        b.Number,
+        b.Created_Date
+      ORDER BY b.Company_Name
     `;
+
 
     // ✅ Use the correct type for createQueryJob
     const options: BQQuery = { query: sql, useLegacySql: false };

@@ -1,7 +1,7 @@
 'use client';
 import React, { JSX, useEffect, useState } from 'react';
 import CreatableSelect from 'react-select/creatable';
-import { StylesConfig } from 'react-select';
+import { StylesConfig, CSSObjectWithLabel } from 'react-select';
 import { FaTrash, FaPencilAlt } from 'react-icons/fa';
 
 /* --- Types --- */
@@ -35,13 +35,35 @@ type OrderRow = {
   quantity: number | string;
 };
 
-/* --- Props --- */
+async function createFsDoc(
+  collection: 'customers' | 'agents' | 'items',
+  body: Record<string, unknown>
+): Promise<{ id: string }> {
+  const res = await fetch(`/api/fs/${collection}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  const jsonBody = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok || !jsonBody?.id) {
+    const errMsg = (jsonBody?.error ?? jsonBody?.message) ?? `Failed to create ${collection}`;
+    throw new Error(String(errMsg));
+  }
+  return { id: String(jsonBody.id) };
+}
+
+/* -------------------------
+   component
+   ------------------------- */
 export default function OrderForm({
   closeModal,
   refreshOrders,
+  createOrder, // new optional prop
 }: {
   closeModal?: () => void;
   refreshOrders?: () => void;
+  createOrder?: (data: unknown) => Promise<unknown>;
 }): JSX.Element {
   const [step, setStep] = useState<number>(1);
 
@@ -62,17 +84,16 @@ export default function OrderForm({
   const [selectedAgent, setSelectedAgent] = useState<OptionType | null>(null);
   const [agentPhone, setAgentPhone] = useState<string>('');
 
-  // order confirmation toggle (iPhone style)
-  // kept at top-level of the form so it's preserved between steps
+  // confirmation toggle
   const [isConfirmed, setIsConfirmed] = useState<boolean>(true);
 
   // step2
   const [orderItems, setOrderItems] = useState<OrderRow[]>([]);
   const [currentItem, setCurrentItem] = useState<ItemType | null>(null);
-  const [availableColors, setAvailableColors] = useState<string[]>([]); // for selected item
-  const [selectedColors, setSelectedColors] = useState<string[]>([]); // user-selected colors (array)
-  const [currentQty, setCurrentQty] = useState<string>(''); // blank initially
-  const [editingIndex, setEditingIndex] = useState<number | null>(null); // index for editing a row
+  const [availableColors, setAvailableColors] = useState<string[]>([]);
+  const [selectedColors, setSelectedColors] = useState<string[]>([]);
+  const [currentQty, setCurrentQty] = useState<string>('');
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
 
   // global
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -80,50 +101,47 @@ export default function OrderForm({
   const [itemError, setItemError] = useState<string>('');
   const [step1Error, setStep1Error] = useState<string>('');
 
-  /* --- react-select style typing --- */
   const customStyles: StylesConfig<OptionType, false> = {
-    control: (provided) => ({
+    control: (provided: CSSObjectWithLabel) => ({
       ...provided,
       backgroundColor: '#1f2937',
       borderColor: '#374151',
       color: 'white',
       minHeight: '42px',
     }),
-    singleValue: (provided) => ({ ...provided, color: 'white' }),
-    menu: (provided) => ({ ...provided, backgroundColor: '#1f2937' }),
-    option: (provided, state) => ({
+    singleValue: (provided: CSSObjectWithLabel) => ({ ...provided, color: 'white' }),
+    menu: (provided: CSSObjectWithLabel) => ({ ...provided, backgroundColor: '#1f2937' }),
+    option: (
+      provided: CSSObjectWithLabel,
+      state: { isSelected?: boolean; isFocused?: boolean }
+    ) => ({
       ...provided,
       backgroundColor: state.isSelected ? '#3b82f6' : state.isFocused ? '#374151' : '#1f2937',
       color: 'white',
     }),
-    input: (provided) => ({ ...provided, color: 'white' }),
-    placeholder: (provided) => ({ ...provided, color: '#9ca3af' }),
+    input: (provided: CSSObjectWithLabel) => ({ ...provided, color: 'white' }),
+    placeholder: (provided: CSSObjectWithLabel) => ({ ...provided, color: '#9ca3af' }),
   };
 
   /* -------------------------
-     Helpers: normalize, merge, FS create
+     Helpers: normalize, merge, find
      ------------------------- */
   function normKey(s: unknown) {
     return String(s ?? '').trim().toLowerCase();
   }
 
-  // Merge arrays by Company_Name / value / label (prefer existing non-empty fields)
-  function mergeOptions(primary: OptionType[], secondary: OptionType[]) {
+  function mergeOptions(primary: OptionType[], secondary: OptionType[]): OptionType[] {
     const map = new Map<string, OptionType>();
     const put = (o: OptionType) => {
-      const key = normKey((o as any).Company_Name ?? o.value ?? o.label);
+      const key = normKey(o.Company_Name ?? o.value ?? o.label);
       if (!key) return;
       const prev = map.get(key);
       if (!prev) {
         map.set(key, { ...o });
       } else {
-        // shallow merge: keep fields from prev if present, else take from o
-        map.set(key, {
-          ...prev,
-          ...Object.fromEntries(
-            Object.entries(o).filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '')
-          ),
-        });
+        const entries = Object.entries(o).filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '');
+        const merged = { ...prev, ...Object.fromEntries(entries) } as OptionType;
+        map.set(key, merged);
       }
     };
     primary.forEach(put);
@@ -131,30 +149,26 @@ export default function OrderForm({
     return Array.from(map.values());
   }
 
-  // POST helper to server route that uses firebase-admin
-  async function createFsDoc(
-    collection: 'customers' | 'agents' | 'items',
-    body: Record<string, unknown>
-  ): Promise<{ id: string }> {
-    const res = await fetch(`/api/fs/${collection}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok || !json?.id) {
-      throw new Error((json as any).error ?? `Failed to create ${collection}`);
-    }
-    return { id: (json as any).id as string };
-  }
-
   function findExistingOption(list: OptionType[], name: string): OptionType | undefined {
     const key = normKey(name);
     return list.find((o) => {
-      const candidate = normKey((o as any).Company_Name ?? o.label ?? o.value);
+      const candidate = normKey(o.Company_Name ?? o.label ?? o.value);
       return candidate === key;
     });
   }
+
+  /* -------------------------
+     Parse / normalise fetch responses (accept [] or { rows: [] })
+     ------------------------- */
+  const normalizeListResponse = async (res: Response): Promise<unknown[]> => {
+    if (!res.ok) return [];
+    const json = await res.json().catch(() => null);
+    if (Array.isArray(json)) return json;
+    if (json && Array.isArray((json as any).rows)) return (json as any).rows;
+    // If the endpoint returns an object map, attempt to extract values
+    if (json && typeof json === 'object') return Object.values(json);
+    return [];
+  };
 
   /* -------------------------
      Fetch & merge BQ + Firestore
@@ -175,76 +189,75 @@ export default function OrderForm({
           fetch('/api/fs/items'),
         ]);
 
-        const customersBQ = (customersRes.ok ? await customersRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
-        const agentsBQ = (agentsRes.ok ? await agentsRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
-        const itemsBQ = (itemsRes.ok ? await itemsRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
+        const customersBQ = await normalizeListResponse(customersRes);
+        const agentsBQ = await normalizeListResponse(agentsRes);
+        const itemsBQ = await normalizeListResponse(itemsRes);
 
-        const customersFS = (fsCustomersRes.ok ? await fsCustomersRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
-        const agentsFS = (fsAgentsRes.ok ? await fsAgentsRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
-        const itemsFS = (fsItemsRes.ok ? await fsItemsRes.json().catch(() => ({ rows: [] })) : { rows: [] }).rows ?? [];
+        const customersFS = await normalizeListResponse(fsCustomersRes);
+        const agentsFS = await normalizeListResponse(fsAgentsRes);
+        const itemsFS = await normalizeListResponse(fsItemsRes);
 
-        // mappers
-        const mapCustomer = (cRaw: any): OptionType => {
-          const c = cRaw ?? {};
-          const company = c.Company_Name ?? c.company_name ?? '';
-          const city = c.City ?? '';
+        const mapCustomer = (cRaw: unknown): OptionType => {
+          const c = (cRaw ?? {}) as Record<string, unknown>;
+          const company = (c.Company_Name ?? c.company_name ?? c.label ?? '') as string;
+          const city = (c.City ?? '') as string;
           return {
             ...c,
             value: (company || String(c.id ?? '')),
             label: `${company || 'Unknown'}${city ? ` [${city}]` : ''}`,
             Company_Name: company,
-            Email: c.Email ?? c.email ?? '',
-            Number: c.Number ?? c.phone ?? '',
-            Broker: c.Broker ?? '',
-            Agent_Name: c.Agent_Name ?? '',
-            id: c.id ?? c._id ?? c.id,
+            Email: (c.Email ?? c.email ?? '') as string,
+            Number: (c.Number ?? c.phone ?? '') as string,
+            Broker: (c.Broker ?? '') as string,
+            Agent_Name: (c.Agent_Name ?? '') as string,
+            id: (c.id ?? c._id ?? c.id) as string | number | undefined,
           } as OptionType;
         };
 
-        const mapAgent = (aRaw: any): OptionType => {
-          const a = aRaw ?? {};
-          const name = a.Company_Name ?? a.name ?? '';
+        const mapAgent = (aRaw: unknown): OptionType => {
+          const a = (aRaw ?? {}) as Record<string, unknown>;
+          const name = (a.Company_Name ?? a.name ?? a.label ?? '') as string;
           return {
             ...a,
             value: (name || String(a.id ?? '')),
             label: name || String(a.id ?? ''),
             Company_Name: name,
-            number: a.Number ?? a.phone ?? a.Contact_Number ?? a.contact_number ?? '',
-            id: a.id ?? a._id ?? a.id,
+            number: (a.Number ?? a.phone ?? a.Contact_Number ?? a.contact_number ?? '') as string,
+            id: (a.id ?? a._id ?? a.id) as string | number | undefined,
           } as OptionType;
         };
 
-        const mapItem = (iRaw: any): ItemType => {
-          const i = iRaw ?? {};
+        const mapItem = (iRaw: unknown): ItemType => {
+          const i = (iRaw ?? {}) as Record<string, unknown>;
           let colors: string[] = [];
           if (Array.isArray(i.Colors)) colors = (i.Colors as unknown[]).map(String);
           else if (Array.isArray(i.colors)) colors = (i.colors as unknown[]).map(String);
-          else if (i.colors_string) colors = String(i.colors_string).split(',').map((s: string) => s.trim()).filter(Boolean);
+          else if (i.colors_string) colors = String(i.colors_string).split(',').map((s) => s.trim()).filter(Boolean);
           else if (i.Color) colors = [String(i.Color).trim()];
 
           colors = Array.from(new Set(colors.map((c) => String(c || '').trim()).filter(Boolean)));
-
-          const label = i.Item ?? i.sku ?? String(i.id ?? '');
+          const label = (i.Item ?? i.sku ?? i.label ?? String(i.id ?? '')) as string;
           return {
             ...i,
             value: label,
             label,
             colors,
-            id: i.id ?? i._id ?? i.id,
+            id: (i.id ?? i._id ?? i.id) as string | number | undefined,
           } as ItemType;
         };
 
-        // Build mapped arrays
-        const mappedCustomersBQ = customersBQ.map(mapCustomer);
-        const mappedCustomersFS = customersFS.map(mapCustomer);
+        const mappedCustomersBQ: OptionType[] = (customersBQ as unknown[]).map(mapCustomer);
+        const mappedCustomersFS: OptionType[] = (customersFS as unknown[]).map(mapCustomer);
         const mergedCustomers = mergeOptions(mappedCustomersBQ, mappedCustomersFS);
 
-        const mappedAgentsBQ = agentsBQ.map(mapAgent);
-        const mappedAgentsFS = agentsFS.map(mapAgent);
+        const mappedAgentsBQ: OptionType[] = (agentsBQ as unknown[]).map(mapAgent);
+        const mappedAgentsFS: OptionType[] = (agentsFS as unknown[]).map(mapAgent);
         const mergedAgents = mergeOptions(mappedAgentsBQ, mappedAgentsFS);
 
-        const mappedItems = [...(itemsBQ.map(mapItem)), ...(itemsFS.map(mapItem))];
-        // dedupe items by value
+        const mappedItems = [
+          ...(Array.isArray(itemsBQ) ? (itemsBQ as unknown[]).map(mapItem) : []),
+          ...(Array.isArray(itemsFS) ? (itemsFS as unknown[]).map(mapItem) : []),
+        ];
         const itemMap = new Map<string, ItemType>();
         for (const it of mappedItems) {
           itemMap.set(normKey(it.value), it);
@@ -263,6 +276,7 @@ export default function OrderForm({
         setLoadingItems(false);
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     void fetchData();
   }, []);
 
@@ -309,37 +323,32 @@ export default function OrderForm({
   }, [selectedCustomer, agents]);
 
   /* -------------------------
-     Creatable: create handlers (optimistic + POST)
-     - Saves customer email & phone (when creating customer)
-     - Saves agent phone (when creating agent)
+     Creatable handlers
      ------------------------- */
   async function handleCreateCustomer(input: string): Promise<void> {
     const name = input.trim();
     if (!name) return;
-    // duplicate guard
     const existing = findExistingOption(customers, name);
     if (existing) {
       setSelectedCustomer(existing);
-      // if existing has contact info, populate inputs
       setCustomerEmail((existing.Email as string) ?? (existing.email as string) ?? '');
       setCustomerPhone((existing.Number as string) ?? (existing.phone as string) ?? '');
       return;
     }
 
-    // include current email/phone values (may be blank)
     const optimistic: OptionType = { value: name, label: name, Company_Name: name, Email: customerEmail, Number: customerPhone };
     setCustomers((prev) => [optimistic, ...prev]);
     setSelectedCustomer(optimistic);
 
     try {
-      // include email/number in saved doc
       const payload = { Company_Name: name, Email: customerEmail ?? '', Number: customerPhone ?? '' };
       const { id } = await createFsDoc('customers', payload);
-      setCustomers((prev) => prev.map((c) => (c === optimistic ? { ...c, id } : c)));
+      // match by value (safer than object identity)
+      setCustomers((prev) => prev.map((c) => (normKey(c.value) === normKey(optimistic.value) ? { ...c, id } : c)));
     } catch (errUnknown) {
       console.error('create customer error', errUnknown);
       setError('Could not save new customer.');
-      setCustomers((prev) => prev.filter((c) => c !== optimistic));
+      setCustomers((prev) => prev.filter((c) => normKey(c.value) !== normKey(optimistic.value)));
       setSelectedCustomer(null);
     }
   }
@@ -350,7 +359,7 @@ export default function OrderForm({
     const existing = findExistingOption(agents, name);
     if (existing) {
       setSelectedAgent(existing);
-      setAgentPhone((existing as any).number ?? (existing as any).phone ?? '');
+      setAgentPhone((existing.number as string) ?? (existing.phone as string) ?? '');
       return;
     }
 
@@ -359,14 +368,13 @@ export default function OrderForm({
     setSelectedAgent(optimistic);
 
     try {
-      // include phone in saved doc
       const payload = { Company_Name: name, Number: agentPhone ?? '' };
       const { id } = await createFsDoc('agents', payload);
-      setAgents((prev) => prev.map((a) => (a === optimistic ? { ...a, id } : a)));
+      setAgents((prev) => prev.map((a) => (normKey(a.value) === normKey(optimistic.value) ? { ...a, id } : a)));
     } catch (errUnknown) {
       console.error('create agent error', errUnknown);
       setError('Could not save new agent.');
-      setAgents((prev) => prev.filter((a) => a !== optimistic));
+      setAgents((prev) => prev.filter((a) => normKey(a.value) !== normKey(optimistic.value)));
       setSelectedAgent(null);
     }
   }
@@ -389,13 +397,34 @@ export default function OrderForm({
 
     try {
       const { id } = await createFsDoc('items', { Item: name, Colors: [] });
-      setAvailableItems((prev) => prev.map((i) => (i === optimistic ? { ...i, id } : i)));
+      setAvailableItems((prev) => prev.map((i) => (normKey(i.value) === normKey(optimistic.value) ? { ...i, id } : i)));
     } catch (errUnknown) {
       console.error('create item error', errUnknown);
       setError('Could not save new item.');
-      setAvailableItems((prev) => prev.filter((i) => i !== optimistic));
+      setAvailableItems((prev) => prev.filter((i) => normKey(i.value) !== normKey(optimistic.value)));
       setCurrentItem(null);
     }
+  }
+
+  /* --- helpers to merge order rows (avoid duplicates) --- */
+  function addOrMergeRows(existing: OrderRow[], newRows: OrderRow[]): OrderRow[] {
+    // key: item.value + '||' + color
+    const map = new Map<string, OrderRow>();
+    for (const r of existing) {
+      const key = `${normKey(r.item?.value ?? r.item?.label ?? '')}||${normKey(r.color)}`;
+      map.set(key, { ...r, quantity: Number(r.quantity) || 0 });
+    }
+    for (const r of newRows) {
+      const key = `${normKey(r.item?.value ?? r.item?.label ?? '')}||${normKey(r.color)}`;
+      const existingRow = map.get(key);
+      if (existingRow) {
+        existingRow.quantity = Number(existingRow.quantity) + Number(r.quantity);
+        map.set(key, existingRow);
+      } else {
+        map.set(key, { ...r, quantity: Number(r.quantity) || 0 });
+      }
+    }
+    return Array.from(map.values());
   }
 
   /* --- handlers with typed params --- */
@@ -430,22 +459,16 @@ export default function OrderForm({
     setItemError('');
   };
 
-  // Determine minimum colors required for the selected item:
-  // - if availableColors >= 3 => require 3
-  // - if availableColors 1 or 2 => require 1
-  // - if availableColors === 0 => require 0 (allow adding without color)
   const minColorsRequired = (): number => {
     if (availableColors.length >= 3) return 3;
     if (availableColors.length >= 1) return 1;
     return 0;
   };
 
-  // Validation conditions adjusted to allow items with <3 colors
   const canAddOrUpdate = (): boolean => {
     const qtyNum = Number(currentQty);
     const minReq = minColorsRequired();
     const selectedCount = Array.isArray(selectedColors) ? selectedColors.length : 0;
-    // selectedCount must be >= minReq
     return !!currentItem && selectedCount >= minReq && !Number.isNaN(qtyNum) && qtyNum > 0;
   };
 
@@ -469,9 +492,6 @@ export default function OrderForm({
       return;
     }
 
-    // Build entries:
-    // - If selectedColors has items, create one row per selected color (existing behavior)
-    // - If selectedColors is empty (minReq === 0), create a single row with color = ""
     let newEntries: OrderRow[] = [];
     if (selCount > 0) {
       newEntries = selectedColors.map((col) => ({
@@ -480,27 +500,20 @@ export default function OrderForm({
         quantity: qty,
       }));
     } else {
-      // no colors available / selected -> create single row with empty color
-      newEntries = [
-        {
-          item: currentItem,
-          color: '',
-          quantity: qty,
-        },
-      ];
+      newEntries = [{ item: currentItem, color: '', quantity: qty }];
     }
 
     if (editingIndex !== null && editingIndex >= 0 && editingIndex < orderItems.length) {
-      // If editing, replace that single row with the first new entry (editing expects 1 row)
+      // replace the single edited row with potentially multiple new rows
       const updated = [...orderItems];
-      updated[editingIndex] = newEntries[0];
-      setOrderItems(updated);
+      updated.splice(editingIndex, 1, ...newEntries);
+      setOrderItems(addOrMergeRows(updated, [])); // make sure merging duplicates after replace
       setEditingIndex(null);
     } else {
-      setOrderItems((prev) => [...prev, ...newEntries]);
+      // append and merge duplicates
+      setOrderItems((prev) => addOrMergeRows(prev, newEntries));
     }
 
-    // reset inputs
     setCurrentItem(null);
     setAvailableColors([]);
     setSelectedColors([]);
@@ -550,7 +563,6 @@ export default function OrderForm({
       setError('Add at least one item to the order.');
       return;
     }
-    // ensure all rows have valid qty > 0
     for (const r of orderItems) {
       if (!r.quantity || Number.isNaN(Number(r.quantity)) || Number(r.quantity) <= 0) {
         setError('All order items must have quantity > 0.');
@@ -573,36 +585,60 @@ export default function OrderForm({
           number: agentPhone,
         },
         items: orderItems.map((it) => ({
-          sku: it.item?.value ?? it.item?.Item ?? it.item?.sku ?? '',
+          sku: it.item?.sku ?? it.item?.value ?? '',
           itemName: it.item?.label ?? it.item?.Item ?? '',
           color: it.color,
-          quantity: parseInt(String(it.quantity), 10),
+          quantity: Number(it.quantity),
         })),
-        // Order status (saved to DB as string)
         orderStatus: isConfirmed ? 'Confirmed' : 'Unconfirmed',
       };
 
-      const res = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      });
-
-      if (!res.ok) {
-        const contentType = res.headers.get('content-type') ?? '';
-        if (contentType.includes('application/json')) {
-          const json = await res.json().catch(() => ({}));
-          setError((json as Record<string, unknown>).error as string ?? 'Failed to create order.');
-        } else {
-          setError('Failed to create order.');
-        }
+      // If parent provided createOrder, use it (OrdersPage does). Otherwise, fall back to direct API call.
+      let body: unknown = null;
+      if (typeof createOrder === 'function') {
+        // createOrder is expected to throw on error
+        body = await createOrder(payload);
       } else {
-        if (typeof refreshOrders === 'function') refreshOrders();
-        if (typeof closeModal === 'function') closeModal();
+        const res = await fetch('/api/orders', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+        const ct = res.headers.get('content-type') ?? '';
+        body = ct.includes('application/json') ? (await res.json().catch(() => null)) : null;
+        if (!res.ok) {
+          const serverMsg = body && (body as any).message ? (body as any).message : `HTTP ${res.status}`;
+          throw new Error(String(serverMsg));
+        }
       }
+
+      // keep existing BigQuery / server error checks (if your createOrder returns similar shape, these still work)
+      if (body) {
+        if ((body as any).bigQueryError) {
+          const details = typeof (body as any).bigQueryError === 'string' ? (body as any).bigQueryError : JSON.stringify((body as any).bigQueryError, null, 2);
+          window.alert(`BigQuery INSERT FAILED — full error details:\n\n${details}`);
+          if (typeof refreshOrders === 'function') await refreshOrders();
+          if (typeof closeModal === 'function') closeModal();
+          return;
+        }
+        if ((body as any).bigQuery && (body as any).bigQuery.totalErrors && (body as any).bigQuery.totalErrors > 0) {
+          const summary = JSON.stringify((body as any).bigQuery, null, 2);
+          window.alert(`BigQuery reported ${(body as any).bigQuery.totalErrors} row errors. Full summary:\n\n${summary}`);
+          if (typeof refreshOrders === 'function') await refreshOrders();
+          if (typeof closeModal === 'function') closeModal();
+          return;
+        }
+      }
+
+      if (typeof refreshOrders === 'function') {
+        try { await refreshOrders(); } catch (e) { console.warn('refreshOrders failed after create:', e); }
+      }
+      if (typeof closeModal === 'function') closeModal();
     } catch (errUnknown) {
       console.error('submit error', errUnknown);
+      const msg = errUnknown instanceof Error ? errUnknown.message : String(errUnknown);
       setError('An unexpected error occurred.');
+      window.alert(`Failed to create order — unexpected error:\n\n${msg}`);
     } finally {
       setIsSubmitting(false);
     }
@@ -611,6 +647,7 @@ export default function OrderForm({
   /* -------------------------
      Render
      ------------------------- */
+
   return (
     <form onSubmit={handleSubmit} className="bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-3xl mx-auto">
       <h2 className="text-2xl font-bold text-white mb-6">Create Order</h2>
@@ -619,6 +656,7 @@ export default function OrderForm({
 
       {step === 1 ? (
         <div>
+          {/* Step 1 UI (unchanged) */}
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Customer</label>
             <CreatableSelect
@@ -686,6 +724,7 @@ export default function OrderForm({
         </div>
       ) : (
         <div>
+          {/* Step 2 UI (unchanged) */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">Item</label>
@@ -822,7 +861,7 @@ export default function OrderForm({
             </table>
           </div>
 
-          {/* Show current Order Status right above the Create Order button */}
+          {/* Status + Submit (unchanged) */}
           <div className="mb-4 flex items-center justify-between">
             <div className="flex items-center gap-4">
               <div>
@@ -830,7 +869,6 @@ export default function OrderForm({
                 <div className="text-xs text-gray-400">{isConfirmed ? 'Confirmed' : 'Unconfirmed'}</div>
               </div>
 
-              {/* iPhone-style toggle for Confirmed / Unconfirmed (moved here) */}
               <button
                 type="button"
                 role="switch"
@@ -844,9 +882,7 @@ export default function OrderForm({
               </button>
             </div>
 
-            <div className="text-sm text-gray-400">
-              (This will be saved to the database as a string)
-            </div>
+            <div className="text-sm text-gray-400">(This will be saved to the database as a string)</div>
           </div>
 
           <div className="flex justify-between mt-6">
