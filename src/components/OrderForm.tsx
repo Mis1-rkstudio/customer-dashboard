@@ -47,23 +47,8 @@ function normKey(s: unknown) {
   return String(s ?? '').trim().toLowerCase();
 }
 
-/* --- FS create helper --- */
-async function createFsDoc(
-  collection: 'customers' | 'agents' | 'items',
-  body: Record<string, unknown>
-): Promise<{ id: string }> {
-  const res = await fetch(`/api/fs/${collection}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-
-  const jsonBody = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!res.ok || !jsonBody?.id) {
-    const errMsg = (jsonBody?.error ?? jsonBody?.message) ?? `Failed to create ${collection}`;
-    throw new Error(String(errMsg));
-  }
-  return { id: String(jsonBody.id) };
+function makeTempId(prefix = '') {
+  return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
 /* -------------------------
@@ -181,7 +166,7 @@ export default function OrderForm({
   };
 
   /* -------------------------
-     Fetch & merge BQ + Firestore
+     Fetch & merge BQ only (no /api/fs calls)
      ------------------------- */
   useEffect(() => {
     async function fetchData(): Promise<void> {
@@ -190,22 +175,15 @@ export default function OrderForm({
       setLoadingItems(true);
       setError('');
       try {
-        const [customersRes, agentsRes, itemsRes, fsCustomersRes, fsAgentsRes, fsItemsRes] = await Promise.all([
+        const [customersRes, agentsRes, itemsRes] = await Promise.all([
           fetch('/api/customers'),
           fetch('/api/agents'),
           fetch('/api/items'),
-          fetch('/api/fs/customers'),
-          fetch('/api/fs/agents'),
-          fetch('/api/fs/items'),
         ]);
 
         const customersBQ = await normalizeListResponse(customersRes);
         const agentsBQ = await normalizeListResponse(agentsRes);
         const itemsBQ = await normalizeListResponse(itemsRes);
-
-        const customersFS = await normalizeListResponse(fsCustomersRes);
-        const agentsFS = await normalizeListResponse(fsAgentsRes);
-        const itemsFS = await normalizeListResponse(fsItemsRes);
 
         const mapCustomer = (cRaw: unknown): OptionType => {
           const c = (cRaw ?? {}) as Record<string, unknown>;
@@ -257,17 +235,13 @@ export default function OrderForm({
         };
 
         const mappedCustomersBQ: OptionType[] = (customersBQ as unknown[]).map(mapCustomer);
-        const mappedCustomersFS: OptionType[] = (customersFS as unknown[]).map(mapCustomer);
-        const mergedCustomers = mergeOptions(mappedCustomersBQ, mappedCustomersFS);
+        // no FS merge - keep only BQ results
+        const mergedCustomers = mappedCustomersBQ;
 
         const mappedAgentsBQ: OptionType[] = (agentsBQ as unknown[]).map(mapAgent);
-        const mappedAgentsFS: OptionType[] = (agentsFS as unknown[]).map(mapAgent);
-        const mergedAgents = mergeOptions(mappedAgentsBQ, mappedAgentsFS);
+        const mergedAgents = mappedAgentsBQ;
 
-        const mappedItems = [
-          ...(Array.isArray(itemsBQ) ? (itemsBQ as unknown[]).map(mapItem) : []),
-          ...(Array.isArray(itemsFS) ? (itemsFS as unknown[]).map(mapItem) : []),
-        ];
+        const mappedItems: ItemType[] = Array.isArray(itemsBQ) ? (itemsBQ as unknown[]).map(mapItem) : [];
         const itemMap = new Map<string, ItemType>();
         for (const it of mappedItems) {
           itemMap.set(normKey(it.value), it);
@@ -333,7 +307,8 @@ export default function OrderForm({
   }, [selectedCustomer, agents]);
 
   /* -------------------------
-     Creatable handlers
+     Creatable handlers (NO /api/fs calls)
+     -- these now only do optimistic local updates with temporary ids
      ------------------------- */
   async function handleCreateCustomer(input: string): Promise<void> {
     const name = input.trim();
@@ -346,20 +321,12 @@ export default function OrderForm({
       return;
     }
 
-    const optimistic: OptionType = { value: name, label: name, Company_Name: name, Email: customerEmail, Number: customerPhone };
+    const tempId = makeTempId('c_');
+    const optimistic: OptionType = { value: name, label: name, Company_Name: name, Email: customerEmail, Number: customerPhone, id: tempId };
     setCustomers((prev) => [optimistic, ...prev]);
     setSelectedCustomer(optimistic);
 
-    try {
-      const payload = { Company_Name: name, Email: customerEmail ?? '', Number: customerPhone ?? '' };
-      const { id } = await createFsDoc('customers', payload);
-      setCustomers((prev) => prev.map((c) => (normKey(c.value) === normKey(optimistic.value) ? { ...c, id } : c)));
-    } catch (errUnknown) {
-      console.error('create customer error', errUnknown);
-      setError('Could not save new customer.');
-      setCustomers((prev) => prev.filter((c) => normKey(c.value) !== normKey(optimistic.value)));
-      setSelectedCustomer(null);
-    }
+    // No server call to /api/fs/:collection — this is purely local/optimistic
   }
 
   async function handleCreateAgent(input: string): Promise<void> {
@@ -372,20 +339,12 @@ export default function OrderForm({
       return;
     }
 
-    const optimistic: OptionType = { value: name, label: name, Company_Name: name, number: agentPhone ?? '' };
+    const tempId = makeTempId('a_');
+    const optimistic: OptionType = { value: name, label: name, Company_Name: name, number: agentPhone ?? '', id: tempId };
     setAgents((prev) => [optimistic, ...prev]);
     setSelectedAgent(optimistic);
 
-    try {
-      const payload = { Company_Name: name, Number: agentPhone ?? '' };
-      const { id } = await createFsDoc('agents', payload);
-      setAgents((prev) => prev.map((a) => (normKey(a.value) === normKey(optimistic.value) ? { ...a, id } : a)));
-    } catch (errUnknown) {
-      console.error('create agent error', errUnknown);
-      setError('Could not save new agent.');
-      setAgents((prev) => prev.filter((a) => normKey(a.value) !== normKey(optimistic.value)));
-      setSelectedAgent(null);
-    }
+    // No server call to /api/fs/:collection — local only
   }
 
   async function handleCreateItem(input: string): Promise<void> {
@@ -399,20 +358,13 @@ export default function OrderForm({
       return;
     }
 
-    const optimistic: ItemType = { value: name, label: name, colors: [] };
+    const tempId = makeTempId('i_');
+    const optimistic: ItemType = { value: name, label: name, colors: [], id: tempId };
     setAvailableItems((prev) => [optimistic, ...prev]);
     setCurrentItem(optimistic);
     setAvailableColors([]);
 
-    try {
-      const { id } = await createFsDoc('items', { Item: name, Colors: [] });
-      setAvailableItems((prev) => prev.map((i) => (normKey(i.value) === normKey(optimistic.value) ? { ...i, id } : i)));
-    } catch (errUnknown) {
-      console.error('create item error', errUnknown);
-      setError('Could not save new item.');
-      setAvailableItems((prev) => prev.filter((i) => normKey(i.value) !== normKey(optimistic.value)));
-      setCurrentItem(null);
-    }
+    // No server call to /api/fs/:collection — local only
   }
 
   /* --- helpers to merge order rows (avoid duplicates) --- */
@@ -621,26 +573,6 @@ export default function OrderForm({
           throw new Error(String(serverMsg));
         }
       }
-
-      // If server returned structured error details, show them safely
-      // if (isObject(body)) {
-      //   if ((body as Record<string, unknown>).bigQueryError) {
-      //     const maybeErr = (body as Record<string, unknown>).bigQueryError;
-      //     const details = typeof maybeErr === 'string' ? maybeErr : JSON.stringify(maybeErr, null, 2);
-      //     window.alert(`BigQuery INSERT FAILED — full error details:\n\n${details}`);
-      //     if (typeof refreshOrders === 'function') await refreshOrders();
-      //     if (typeof closeModal === 'function') closeModal();
-      //     return;
-      //   }
-      //   const bigQ = (body as Record<string, unknown>).bigQuery;
-      //   if (isObject(bigQ) && typeof (bigQ as Record<string, unknown>).totalErrors === 'number' && (bigQ as Record<string, unknown>).totalErrors > 0) {
-      //     const summary = JSON.stringify(bigQ, null, 2);
-      //     window.alert(`BigQuery reported ${(bigQ as Record<string, unknown>).totalErrors} row errors. Full summary:\n\n${summary}`);
-      //     if (typeof refreshOrders === 'function') await refreshOrders();
-      //     if (typeof closeModal === 'function') closeModal();
-      //     return;
-      //   }
-      // }
 
       // If server returned structured error details, show them safely
       if (isObject(body)) {
