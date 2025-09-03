@@ -7,8 +7,10 @@ type NormalizedItemRow = { sku: string; itemName: string; color: string; quantit
 type GroupedColor = { color: string; sets: number };
 type GroupedItem = { itemName: string; colors: GroupedColor[] };
 
+// add this helper type so we don't use `any` when calling bigquery.query
+type BQQueryOptions = Parameters<BigQuery['query']>[0];
+
 /** ========== CONFIG ========== */
-// prefer env vars; fallbacks kept for local dev only
 const BQ_PROJECT_ID = process.env.BQ_PROJECT_ID || 'round-kit-450201-r9';
 const BQ_DATASET_ID = process.env.BQ_DATASET_ID || 'frono_2025';
 const BQ_TABLE_ID = process.env.BQ_TABLE_ID || 'orders';
@@ -109,9 +111,7 @@ async function ensureDatasetExists(projectId: string, datasetId: string) {
   }
 }
 
-/** create table if it doesn't exist
- *  NOTE: this schema contains both explicit columns and payload
- */
+/** create table if it doesn't exist */
 async function ensureTableExists(projectId: string, datasetId: string, tableId: string) {
   const dataset = bigquery.dataset(datasetId);
   const [tableExists] = await dataset.table(tableId).exists();
@@ -128,15 +128,29 @@ async function ensureTableExists(projectId: string, datasetId: string, tableId: 
       { name: 'agentNumber', type: 'STRING' },
       { name: 'orderStatus', type: 'STRING' },
       { name: 'totalQty', type: 'INTEGER' },
-      { name: 'items', type: 'STRING' },   // stringified JSON
-      { name: 'payload', type: 'STRING' }, // full canonical payload
-      // soft-delete metadata
+      { name: 'items', type: 'STRING' },
+      { name: 'payload', type: 'STRING' },
       { name: 'cancelledAt', type: 'TIMESTAMP' },
       { name: 'cancelledBy', type: 'STRING' },
     ],
   };
 
   await dataset.createTable(tableId, { schema });
+}
+
+/** helper to extract useful error details from unknown thrown values */
+function extractErrorDetail(err: unknown) {
+  if (err instanceof Error) {
+    return { message: err.message, errors: undefined, reason: undefined, info: err };
+  }
+  if (isObject(err)) {
+    // pick likely fields if present
+    const message = typeof err['message'] === 'string' ? err['message'] : String(err);
+    const errors = err['errors'] ?? undefined;
+    const reason = err['reason'] ?? undefined;
+    return { message, errors, reason, info: err };
+  }
+  return { message: String(err), errors: undefined, reason: undefined, info: err };
 }
 
 /** helper to insert into BigQuery table (catches/throws detailed errors) */
@@ -152,27 +166,24 @@ async function insertRowToBigQuery(
     await table.insert([row], { ignoreUnknownValues: false });
     return { ok: true };
   } catch (err: unknown) {
-    const e = err as any;
-    const detail = {
-      message: e?.message ?? String(e),
-      errors: e?.errors ?? undefined,
-      reason: e?.reason ?? undefined,
-      info: e,
-    };
+    const detail = extractErrorDetail(err);
     const out = new Error('BigQuery insert failed: ' + (detail.message || 'unknown'));
-    (out as any).bigQueryDetails = detail;
+    // attach details in a typed-safe way
+    (out as unknown as Record<string, unknown>)['bigQueryDetails'] = detail;
     throw out;
   }
 }
 
+/** Local typing for query options we pass to bigquery.createQueryJob */
+type QueryOptionsLocal = { query: string; params?: Record<string, unknown>; location?: string };
+
 /** Query helper (returns rows from a SQL query) */
-async function runQuery(sql: string, params?: { [k: string]: unknown }) {
-  // Use createQueryJob for larger queries; params optional.
-  const options: any = { query: sql, location: 'US' };
+async function runQuery(sql: string, params?: Record<string, unknown>): Promise<unknown[]> {
+  const options: QueryOptionsLocal = { query: sql, location: 'US' };
   if (params) options.params = params;
   const [job] = await bigquery.createQueryJob(options);
   const [rows] = await job.getQueryResults();
-  return rows;
+  return rows as unknown[];
 }
 
 /** =========================
@@ -187,7 +198,6 @@ export async function GET(): Promise<NextResponse> {
     await ensureTableExists(BQ_PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID);
 
     const fullTable = `\`${BQ_PROJECT_ID}.${BQ_DATASET_ID}.${BQ_TABLE_ID}\``;
-    // NOTE: do not use parameterized LIMIT here — inline a safe integer.
     const sql = `SELECT id, createdAt, customerName, customerNumber, customerEmail, agentName, agentNumber, orderStatus, totalQty, items, payload
                  FROM ${fullTable}
                  ORDER BY createdAt DESC
@@ -195,46 +205,52 @@ export async function GET(): Promise<NextResponse> {
 
     const rows = await runQuery(sql);
 
-    const out = (rows as any[]).map((r) => {
+    const out = (rows as unknown[]).map((rUn) => {
+      const r = isObject(rUn) ? (rUn as Record<string, unknown>) : {};
       const parsedItems = (() => {
-        if (typeof r.items === 'string' && r.items) {
-          try { return JSON.parse(r.items); } catch { return r.items; }
+        const itemsVal = r['items'];
+        if (typeof itemsVal === 'string' && itemsVal) {
+          try { return JSON.parse(itemsVal); } catch { return itemsVal; }
         }
-        if (typeof r.payload === 'string') {
+        const payloadVal = r['payload'];
+        if (typeof payloadVal === 'string') {
           try {
-            const p = JSON.parse(r.payload);
-            return p?.items ?? r.payload;
-          } catch { return r.payload; }
+            const p = JSON.parse(payloadVal);
+            return isObject(p) ? (p as Record<string, unknown>)['items'] ?? payloadVal : payloadVal;
+          } catch { return payloadVal; }
         }
-        return r.items;
+        return itemsVal;
+      })();
+
+      const normalizedPayload = (() => {
+        const p = r['payload'];
+        if (typeof p === 'string') {
+          try { return JSON.parse(p); } catch { return p; }
+        }
+        return p;
       })();
 
       return {
-        id: r.id,
-        createdAt: r.createdAt,
-        customerName: r.customerName,
-        customerNumber: r.customerNumber,
-        customerEmail: r.customerEmail,
-        agentName: r.agentName,
-        agentNumber: r.agentNumber,
-        orderStatus: r.orderStatus,
-        totalQty: typeof r.totalQty === 'number' ? r.totalQty : Number(r.totalQty || 0),
+        id: r['id'],
+        createdAt: r['createdAt'],
+        customerName: r['customerName'],
+        customerNumber: r['customerNumber'],
+        customerEmail: r['customerEmail'],
+        agentName: r['agentName'],
+        agentNumber: r['agentNumber'],
+        orderStatus: r['orderStatus'],
+        totalQty: typeof r['totalQty'] === 'number' ? r['totalQty'] : Number(r['totalQty'] ?? 0),
         items: parsedItems,
-        payload: (() => {
-          if (typeof r.payload === 'string') {
-            try { return JSON.parse(r.payload); } catch { return r.payload; }
-          }
-          return r.payload;
-        })(),
+        payload: normalizedPayload,
         _rawRow: r,
-      };
+      } as Record<string, unknown>;
     });
 
     return NextResponse.json(out);
   } catch (err: unknown) {
     console.error('GET /api/orders error:', err);
-    const msg = err instanceof Error ? (err as any).message : String(err);
-    return NextResponse.json({ ok: false, message: msg }, { status: 500 });
+    const detail = extractErrorDetail(err);
+    return NextResponse.json({ ok: false, message: detail.message }, { status: 500 });
   }
 }
 
@@ -282,7 +298,7 @@ export async function POST(req: Request): Promise<NextResponse> {
     const orderId = (Date.now().toString(36) + Math.random().toString(36).slice(2, 8)).toUpperCase();
     const createdAt = new Date().toISOString();
 
-    const canonicalOrder = {
+    const canonicalOrder: Record<string, unknown> = {
       id: orderId,
       customer: customerPayload,
       agent: agentPayload ?? null,
@@ -330,11 +346,12 @@ export async function POST(req: Request): Promise<NextResponse> {
     try {
       await insertRowToBigQuery(BQ_PROJECT_ID, BQ_DATASET_ID, BQ_TABLE_ID, row);
     } catch (insertErr: unknown) {
-      console.error('BigQuery insert error (detailed):', (insertErr as any)?.bigQueryDetails ?? insertErr);
+      console.error('BigQuery insert error (detailed):', insertErr);
+      const detail = extractErrorDetail(insertErr);
       return NextResponse.json({
         ok: false,
         message: 'BigQuery insert failed',
-        bigQueryError: (insertErr as any)?.bigQueryDetails ?? String(insertErr),
+        bigQueryError: detail,
         canonicalOrder,
       }, { status: 500 });
     }
@@ -342,8 +359,8 @@ export async function POST(req: Request): Promise<NextResponse> {
     return NextResponse.json({ ok: true, orderId, inserted: 1 }, { status: 201 });
   } catch (err: unknown) {
     console.error('POST /api/orders error:', err);
-    const msg = err instanceof Error ? (err as any).message : String(err);
-    return NextResponse.json({ ok: false, message: msg }, { status: 500 });
+    const detail = extractErrorDetail(err);
+    return NextResponse.json({ ok: false, message: detail.message }, { status: 500 });
   }
 }
 
@@ -365,24 +382,25 @@ export async function PATCH(req: Request): Promise<NextResponse> {
 
     const fullTable = `\`${BQ_PROJECT_ID}.${BQ_DATASET_ID}.${BQ_TABLE_ID}\``;
     const sql = `UPDATE ${fullTable} SET orderStatus = @status WHERE id = @id`;
-    const options = {
+    const options: QueryOptionsLocal = {
       query: sql,
       params: { id, status: newStatus },
       location: 'US',
     };
-    await bigquery.query(options);
+
+    // use strongly-typed cast instead of `any`
+    await bigquery.query(options as BQQueryOptions);
 
     return NextResponse.json({ ok: true, id, orderStatus: newStatus }, { status: 200 });
   } catch (err: unknown) {
     console.error('PATCH /api/orders error:', err);
-    const msg = err instanceof Error ? (err as any).message : String(err);
-    return NextResponse.json({ ok: false, message: msg }, { status: 500 });
+    const detail = extractErrorDetail(err);
+    return NextResponse.json({ ok: false, message: detail.message }, { status: 500 });
   }
 }
 
 /** =========================
- *  DELETE: *soft-delete* — mark as Cancelled (preferred)
- *  If you prefer real DELETE, see commented SQL below.
+ *  DELETE: soft-delete — mark as Cancelled
  *  ========================= */
 export async function DELETE(req: Request): Promise<NextResponse> {
   try {
@@ -397,26 +415,25 @@ export async function DELETE(req: Request): Promise<NextResponse> {
 
     const fullTable = `\`${BQ_PROJECT_ID}.${BQ_DATASET_ID}.${BQ_TABLE_ID}\``;
 
-    // Soft-delete: update status and set cancelledAt/cancelledBy
     const sql = `UPDATE ${fullTable}
                  SET orderStatus = 'Cancelled',
                      cancelledAt = CURRENT_TIMESTAMP(),
                      cancelledBy = @cancelledBy
                  WHERE id = @id`;
-    await bigquery.query({
+    const options: QueryOptionsLocal = {
       query: sql,
       params: { id, cancelledBy },
       location: 'US',
-    });
+    };
 
-    // If you'd rather hard-delete, replace above with:
-    // const sqlDelete = `DELETE FROM ${fullTable} WHERE id = @id`;
-    // await bigquery.query({ query: sqlDelete, params: { id }, location: 'US' });
+    // use strongly-typed cast instead of `any`
+    await bigquery.query(options as BQQueryOptions);
 
     return NextResponse.json({ ok: true, id }, { status: 200 });
   } catch (err: unknown) {
     console.error('DELETE /api/orders error:', err);
-    const msg = err instanceof Error ? (err as any).message : String(err);
-    return NextResponse.json({ ok: false, message: msg }, { status: 500 });
+    const detail = extractErrorDetail(err);
+    return NextResponse.json({ ok: false, message: detail.message }, { status: 500 });
   }
 }
+

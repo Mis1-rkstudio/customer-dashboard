@@ -43,6 +43,26 @@ function safeString(v: unknown): string {
   return String(v).trim();
 }
 
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+
+/** Try to extract a message string from an unknown JSON body safely */
+function extractMessageFromBody(body: unknown): string | undefined {
+  if (!body || typeof body !== 'object') return undefined;
+  const b = body as Record<string, unknown>;
+  if (typeof b.message === 'string' && b.message.trim()) return b.message;
+  if (typeof b.error === 'string' && b.error.trim()) return b.error;
+  // some APIs return nested error structures: { errors: [{ message: '...' }] }
+  if (Array.isArray(b.errors) && b.errors.length > 0) {
+    const first = b.errors[0];
+    if (first && typeof first === 'object' && typeof (first as Record<string, unknown>).message === 'string') {
+      return (first as Record<string, unknown>).message as string;
+    }
+  }
+  return undefined;
+}
+
 /* ---------------------- normalize ---------------------- */
 
 type NormalizedOrder = {
@@ -195,7 +215,8 @@ export default function OrdersPage(): JSX.Element {
           }
         }
         const base2 = normalizeOrderShape(r);
-        (base2 as any).raw = r;
+        // NormalizedOrder has raw?: unknown so set directly
+        base2.raw = r;
         return base2;
       });
 
@@ -282,7 +303,7 @@ export default function OrdersPage(): JSX.Element {
 
   // viewOrders computed once
   const viewOrders = useMemo(() => {
-    if (selectedTab === 'all') return filteredBySearch; // <-- was `orders`
+    if (selectedTab === 'all') return filteredBySearch;
     if (selectedTab === 'active') return activeOrders;
     return cancelledOrders;
   }, [selectedTab, filteredBySearch, activeOrders, cancelledOrders]);
@@ -398,7 +419,8 @@ export default function OrdersPage(): JSX.Element {
       else body = await res.text().catch(() => null);
 
       if (!res.ok) {
-        const msg = (body && typeof body === 'object' && (body as any).message) ? (body as any).message : String(body ?? `HTTP ${res.status}`);
+        const extracted = extractMessageFromBody(body);
+        const msg = extracted ?? String(body ?? `HTTP ${res.status}`);
         throw new Error(msg);
       }
 
@@ -437,7 +459,8 @@ export default function OrdersPage(): JSX.Element {
       else body = await res.text().catch(() => null);
 
       if (!res.ok) {
-        const msg = (body && typeof body === 'object' && (body as any).message) ? (body as any).message : String(body ?? `HTTP ${res.status}`);
+        const extracted = extractMessageFromBody(body);
+        const msg = extracted ?? String(body ?? `HTTP ${res.status}`);
         throw new Error(msg);
       }
 
@@ -706,12 +729,11 @@ export default function OrdersPage(): JSX.Element {
         {selectedOrderId ? <OrderDetails orderId={selectedOrderId} /> : <div className="p-6">Loading...</div>}
       </Modal>
 
-      {/* Create modal: open OrderForm (OrderForm should call createOrder prop if present) */}
+      {/* Create modal: open OrderForm (OrderForm uses closeModal + refreshOrders props) */}
       <Modal isOpen={isCreateModalOpen} onClose={() => setICreateModalOpen(false)}>
         <OrderForm
           closeModal={() => setICreateModalOpen(false)}
           refreshOrders={fetchOrders}
-          createOrder={handleCreateOrder as unknown as ((data: unknown) => Promise<unknown>)}
         />
       </Modal>
     </div>

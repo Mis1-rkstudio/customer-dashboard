@@ -23,34 +23,43 @@ function toSafeString(v: unknown): string {
   return String(v).trim();
 }
 
+function safe(field: unknown, fallback = '—'): string {
+  if (field === null || field === undefined || field === '') return fallback;
+  return String(field);
+}
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+
+/** type-guards for avoiding `any` */
+function hasToDate(v: unknown): v is { toDate: () => Date } {
+  return typeof v === 'object' && v !== null && typeof (v as { toDate?: unknown }).toDate === 'function';
+}
+function hasValueString(v: unknown): v is { value: string } {
+  return typeof v === 'object' && v !== null && typeof (v as { value?: unknown }).value === 'string';
+}
+function isSecondsObject(v: unknown): v is { seconds: number } {
+  return typeof v === 'object' && v !== null && typeof (v as { seconds?: unknown }).seconds === 'number';
+}
+
+/** Format a variety of timestamp shapes into a readable string */
 function formatDate(input: unknown): string {
   if (!input) return '—';
-  if (typeof input === 'object' && input !== null) {
-    const rec = input as Record<string, unknown>;
-    // Firestore Timestamp-like { seconds }
-    if (typeof rec.seconds === 'number') {
-      try {
-        return new Date(rec.seconds * 1000).toLocaleString();
-      } catch {
-        /* fall through */
-      }
-    }
-    // Firestore Timestamp-like with toDate()
-    if ('toDate' in rec && typeof (rec as any).toDate === 'function') {
-      try {
-        const d = (rec as any).toDate();
-        if (d instanceof Date && !Number.isNaN(d.getTime())) return d.toLocaleString();
-      } catch {
-        /* fall through */
-      }
-    }
-    // nested value form { value: 'ISO...' }
-    if ('value' in rec && typeof rec.value === 'string') {
-      try {
-        const d = new Date(rec.value);
-        if (!Number.isNaN(d.getTime())) return d.toLocaleString();
-      } catch { /* ignore */ }
-    }
+  if (isSecondsObject(input)) {
+    try { return new Date(input.seconds * 1000).toLocaleString(); } catch { /* fall through */ }
+  }
+  if (hasToDate(input)) {
+    try {
+      const d = input.toDate();
+      if (d instanceof Date && !Number.isNaN(d.getTime())) return d.toLocaleString();
+    } catch { /* fall through */ }
+  }
+  if (hasValueString(input)) {
+    try {
+      const d = new Date(input.value);
+      if (!Number.isNaN(d.getTime())) return d.toLocaleString();
+    } catch { /* ignore */ }
   }
   try {
     const d = new Date(String(input));
@@ -59,15 +68,6 @@ function formatDate(input: unknown): string {
   } catch {
     return String(input);
   }
-}
-
-function safe(field: unknown, fallback = '—'): string {
-  if (field === null || field === undefined || field === '') return fallback;
-  return String(field);
-}
-
-function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null;
 }
 
 /** return first existing key value from object (or undefined) */
@@ -94,15 +94,10 @@ type NormalizedOrder = {
 function extractCreatedAtFromOrder(o: Record<string, unknown>): unknown {
   const v = o['createdAt'] ?? o['created_at'] ?? o['placedAt'] ?? o['Placed'] ?? o['createdDate'] ?? null;
   if (!v) return null;
-  if (isObject(v)) {
-    // nested { value: 'ISO' }
-    if ('value' in v && typeof (v as any).value === 'string') return (v as any).value;
-    // Firestore seconds object
-    if ('seconds' in v && typeof (v as any).seconds === 'number') return v;
-    // toDate()
-    if ('toDate' in v && typeof (v as any).toDate === 'function') {
-      try { return (v as any).toDate(); } catch { /* ignore */ }
-    }
+  if (hasValueString(v)) return v.value;
+  if (isSecondsObject(v)) return v;
+  if (hasToDate(v)) {
+    try { return v.toDate(); } catch { /* ignore */ }
   }
   return v;
 }

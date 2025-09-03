@@ -14,11 +14,11 @@ function isObject(v: unknown): v is Record<string, unknown> {
 }
 
 function hasToDate(v: unknown): v is TimestampLikeWithToDate {
-  return isObject(v) && typeof (v as { toDate?: unknown }).toDate === 'function';
+  return isObject(v) && typeof (v as Partial<TimestampLikeWithToDate>).toDate === 'function';
 }
 
 function hasSeconds(v: unknown): v is SecondsObject {
-  return isObject(v) && typeof (v as { seconds?: unknown }).seconds === 'number';
+  return isObject(v) && typeof (v as Partial<SecondsObject>).seconds === 'number';
 }
 
 /**
@@ -32,9 +32,9 @@ function tsToISO(ts: unknown): string | null {
   if (ts === null || ts === undefined) return null;
 
   // wrapper object with 'value' string (your screenshot had createdAt: { value: "ISO..." })
-  if (isObject(ts) && typeof (ts as any).value === 'string') {
+  if (isObject(ts) && 'value' in ts && typeof (ts as Record<string, unknown>).value === 'string') {
     try {
-      const maybeIso = String((ts as any).value).trim();
+      const maybeIso = String((ts as Record<string, unknown>).value).trim();
       if (maybeIso) {
         const d = new Date(maybeIso);
         if (!Number.isNaN(d.getTime())) return d.toISOString();
@@ -75,12 +75,13 @@ function tsToISO(ts: unknown): string | null {
 
 /**
  * Safely parse JSON if it's a string; returns parsed object or null.
+ * If input is already an object, returns it (cast to Record).
  */
 function tryParseJson(v: unknown): Record<string, unknown> | null {
   if (typeof v === 'string') {
     try {
-      const p = JSON.parse(v);
-      if (isObject(p)) return p;
+      const parsed = JSON.parse(v);
+      if (isObject(parsed)) return parsed;
       return null;
     } catch {
       return null;
@@ -99,8 +100,8 @@ function tryParseJson(v: unknown): Record<string, unknown> | null {
  */
 export async function GET(request: NextRequest): Promise<NextResponse> {
   try {
-    // best approach: use request.nextUrl if available
-    const url = request.nextUrl ?? new URL(request.url);
+    // use request.nextUrl when available, otherwise fallback to request.url
+    const url = (request as { nextUrl?: URL }).nextUrl ?? new URL(request.url);
     const segments = url.pathname.split('/').filter(Boolean);
     const maybeOrderId = segments.length > 0 ? decodeURIComponent(segments[segments.length - 1]) : '';
     const orderId = String(maybeOrderId ?? '').trim();
@@ -124,19 +125,25 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     // but still keep wrapper fields available (we merge wrapper fields onto payload when safe)
     let canonical: Record<string, unknown> | null = null;
     if ('payload' in raw) {
-      canonical = tryParseJson(raw.payload) ?? tryParseJson((raw as any).payload) ?? null;
-      if (!canonical && typeof raw.payload === 'object' && isObject(raw.payload)) canonical = raw.payload as Record<string, unknown>;
+      const p = raw.payload;
+      // Try parse string payload
+      if (typeof p === 'string' && p.trim()) {
+        canonical = tryParseJson(p);
+      } else if (isObject(p)) {
+        // payload already object
+        canonical = p as Record<string, unknown>;
+      } else {
+        // payload present but not useful — leave canonical null to fall back to raw
+        canonical = null;
+      }
     }
 
     // If no payload or payload isn't usable, use doc fields as canonical
     if (!canonical) {
       canonical = { ...raw };
     } else {
-      // Merge top-level doc fields that are missing in payload (but prefer payload values).
-      // Example: if wrapper has some metadata (source), keep it.
+      // Merge wrapper fields (raw) with payload, letting payload values win for duplicate keys
       canonical = { ...raw, ...canonical };
-      // But prefer payload's content for deep fields (so overwrite wrapper if present)
-      // (we already spread canonical over raw so payload wins for duplicate keys)
     }
 
     // Normalize createdAt using any of the common shapes (including nested { value })
@@ -150,7 +157,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     // Ensure id is present (prefer payload id if present, otherwise doc id)
     const payloadId =
-      (canonical['id'] ?? canonical['orderId'] ?? canonical['order_id'] ?? canonical['ID']) ?? null;
+      canonical['id'] ?? canonical['orderId'] ?? canonical['order_id'] ?? canonical['ID'] ?? null;
     const finalId = String(payloadId ?? snap.id);
 
     // Build final order object to return

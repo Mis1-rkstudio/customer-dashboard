@@ -19,26 +19,45 @@ function safeNumber(v: unknown): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
+/* runtime guards for timestamp-like shapes */
+function isSecondsObject(v: unknown): v is { seconds: number } {
+  return isObject(v) && typeof (v as { seconds?: unknown }).seconds === 'number';
+}
+function hasToDate(v: unknown): v is { toDate: () => Date } {
+  return isObject(v) && typeof (v as { toDate?: unknown }).toDate === 'function';
+}
+
+/** Format many timestamp-like shapes to a human string */
 function formatDate(input: unknown): string {
   if (!input) return '—';
-  // Firestore Timestamp-like (object with seconds)
-  if (isObject(input) && typeof (input as Record<string, unknown>).seconds === 'number') {
+
+  // Firestore seconds object
+  if (isSecondsObject(input)) {
     try {
-      const rec = input as { seconds: number };
-      return new Date(rec.seconds * 1000).toLocaleString();
+      return new Date(input.seconds * 1000).toLocaleString();
     } catch {
       // fall through
     }
   }
+
   // Firestore Timestamp-like with toDate()
-  if (isObject(input) && 'toDate' in (input as Record<string, unknown>) && typeof (input as any).toDate === 'function') {
+  if (hasToDate(input)) {
     try {
-      const d = (input as any).toDate();
+      const d = input.toDate();
       if (d instanceof Date && !Number.isNaN(d.getTime())) return d.toLocaleString();
     } catch {
       // fall through
     }
   }
+
+  // wrapper object with { value: 'ISO...' }
+  if (isObject(input) && 'value' in input && typeof (input as Record<string, unknown>).value === 'string') {
+    try {
+      const d = new Date(String((input as Record<string, unknown>).value));
+      if (!Number.isNaN(d.getTime())) return d.toLocaleString();
+    } catch { /* ignore */ }
+  }
+
   try {
     const d = new Date(String(input));
     if (!isNaN(d.getTime())) return d.toLocaleString();
@@ -46,14 +65,6 @@ function formatDate(input: unknown): string {
   } catch {
     return String(input);
   }
-}
-
-function isSecondsObject(v: unknown): v is { seconds: number } {
-  return typeof v === 'object' && v !== null && 'seconds' in v && typeof (v as Record<string, unknown>)['seconds'] === 'number';
-}
-
-function hasToDate(v: unknown): v is { toDate: () => Date } {
-  return typeof v === 'object' && v !== null && 'toDate' in v && typeof (v as Record<string, unknown>)['toDate'] === 'function';
 }
 
 /* --- Types used in component --- */
@@ -68,28 +79,33 @@ type NormalizedOrder = {
   raw?: unknown;
 };
 
-/** Normalize an arbitrary order shape into a predictable object */
-/* --- Add this helper near the other helpers at top --- */
+/* --- Helpers to extract createdAt from common nested shapes --- */
 function extractCreatedAtFromOrder(orderRec: Record<string, unknown>): unknown {
-  // Common shapes: ISO string, { value: '2025-..' }, Firestore { seconds: ... }, timestamp object with toDate()
   const v = orderRec['createdAt'] ?? orderRec['created_at'] ?? orderRec['placedAt'] ?? orderRec['Placed'] ?? orderRec['createdDate'] ?? null;
   if (!v) return null;
 
-  if (isObject(v)) {
-    // nested value string e.g. { value: "2025-09-03T10:11:32.500Z" }
-    if ('value' in v && typeof (v as any).value === 'string') return (v as any).value;
-    // Firestore seconds object
-    if ('seconds' in v && typeof (v as any).seconds === 'number') return v;
-    // timestamp-like with toDate()
-    if ('toDate' in v && typeof (v as any).toDate === 'function') {
-      try { return (v as any).toDate(); } catch { /* fall through */ }
+  // nested { value: 'ISO...' }
+  if (isObject(v) && 'value' in v && typeof (v as Record<string, unknown>).value === 'string') {
+    return (v as Record<string, unknown>).value;
+  }
+
+  // Firestore seconds object { seconds: number }
+  if (isSecondsObject(v)) return v;
+
+  // Firestore Timestamp-like with toDate()
+  if (hasToDate(v)) {
+    try {
+      return v.toDate();
+    } catch {
+      /* ignore */
     }
   }
 
+  // fallback to primitive or string
   return v;
 }
 
-/** Normalize an arbitrary order shape into a predictable object (REPLACEMENT) */
+/** Normalize an arbitrary order shape into a predictable object */
 function normalizeOrder(order: unknown): NormalizedOrder {
   if (!isObject(order)) {
     return {
@@ -102,18 +118,19 @@ function normalizeOrder(order: unknown): NormalizedOrder {
     };
   }
 
-  // If a wrapper record like { id, payload, ... } and payload is present prefer the payload
+  // Support wrapper records { id, payload, ... } where payload may be string or object
   if ('payload' in order) {
     const rec = order as Record<string, unknown>;
-    if (typeof rec.payload === 'string' && rec.payload.trim()) {
+    const p = rec.payload;
+    if (typeof p === 'string' && p.trim()) {
       try {
-        const parsed = JSON.parse(rec.payload);
+        const parsed = JSON.parse(p);
         if (isObject(parsed)) order = parsed;
       } catch {
-        // ignore - we'll fall back to wrapper
+        // ignore parse error and continue with wrapper
       }
-    } else if (isObject(rec.payload)) {
-      order = rec.payload as Record<string, unknown>;
+    } else if (isObject(p)) {
+      order = p;
     }
   }
 
@@ -165,9 +182,7 @@ function normalizeOrder(order: unknown): NormalizedOrder {
           ''
         );
 
-        // top-level sets on the item (applies to each color if colors are primitives)
         const itemLevelSets = safeNumber(itemObj['sets'] ?? itemObj['set'] ?? 0);
-
         const colors = Array.isArray(itemObj['colors']) ? (itemObj['colors'] as unknown[]) : [];
 
         for (const c of colors) {
@@ -177,9 +192,8 @@ function normalizeOrder(order: unknown): NormalizedOrder {
             const sets = safeNumber(cObj['sets'] ?? cObj['set'] ?? cObj['qty'] ?? cObj['quantity'] ?? itemLevelSets);
             itemsFlat.push({ itemName, color, quantity: sets });
           } else {
-            // primitive color string; use item-level sets if present
             const color = safeString(c);
-            const sets = itemLevelSets; // if 0, will be 0
+            const sets = itemLevelSets;
             itemsFlat.push({ itemName, color, quantity: sets });
           }
         }
@@ -229,7 +243,6 @@ function normalizeOrder(order: unknown): NormalizedOrder {
   };
 }
 
-
 function aggregateItems(items: FlatItem[]): FlatItem[] {
   const map = new Map<string, FlatItem>();
   for (const it of items) {
@@ -269,31 +282,20 @@ export default function OrderDetails({ orderId }: { orderId: string }): JSX.Elem
           return;
         }
 
-        // possible shapes:
-        // - an array of rows
-        // - { rows: [...] }
-        // - { orders: [...] }
-        // - single order object (rare)
+        // possible shapes returned by /api/orders: array, { rows: [] }, { orders: [] }, single order or { order: {...} }
         let rows: unknown[] = [];
         if (Array.isArray(data)) rows = data;
         else if (isObject(data) && Array.isArray((data as Record<string, unknown>).rows)) rows = (data as Record<string, unknown>).rows as unknown[];
         else if (isObject(data) && Array.isArray((data as Record<string, unknown>).orders)) rows = (data as Record<string, unknown>).orders as unknown[];
-        else if (isObject(data) && (data as Record<string, unknown>).order) {
-          // single order returned as { order: {...} }
-          rows = [(data as Record<string, unknown>).order as unknown];
-        } else if (isObject(data)) {
-          // Possibly the API returned a single order object directly (or wrapped with ok:true)
-          rows = [data];
-        } else {
-          rows = [];
-        }
+        else if (isObject(data) && (data as Record<string, unknown>).order) rows = [(data as Record<string, unknown>).order as unknown];
+        else if (isObject(data)) rows = [data];
+        else rows = [];
 
-        // find candidate row by id or payload.id or payload.orderId etc.
+        // find candidate row by id or payload.id/orderId/order_id
         const match = rows.find((r) => {
           if (!isObject(r)) return false;
           const rec = r as Record<string, unknown>;
 
-          // direct top-level id matches
           const candidateIds = [
             safeString(rec['id']),
             safeString(rec['orderId']),
@@ -303,7 +305,6 @@ export default function OrderDetails({ orderId }: { orderId: string }): JSX.Elem
 
           if (candidateIds.some((cid) => cid === orderId)) return true;
 
-          // check if payload exists (string or object)
           if ('payload' in rec) {
             const p = rec['payload'];
             if (typeof p === 'string') {
@@ -313,16 +314,13 @@ export default function OrderDetails({ orderId }: { orderId: string }): JSX.Elem
                   const pid = safeString(parsed['id'] ?? parsed['orderId'] ?? parsed['order_id'] ?? parsed['ID'] ?? parsed['OrderID']);
                   if (pid === orderId) return true;
                 }
-              } catch {
-                // ignore
-              }
+              } catch { /* ignore */ }
             } else if (isObject(p)) {
               const pid = safeString((p as Record<string, unknown>)['id'] ?? (p as Record<string, unknown>)['orderId'] ?? (p as Record<string, unknown>)['order_id']);
               if (pid === orderId) return true;
             }
           }
 
-          // last resort: check nested payload-like fields
           const nestedId = safeString(rec['payload'] ?? rec['order'] ?? rec['orderPayload'] ?? '');
           if (nestedId === orderId) return true;
 
@@ -335,7 +333,7 @@ export default function OrderDetails({ orderId }: { orderId: string }): JSX.Elem
           return;
         }
 
-        // If matched record includes payload string, prefer parsed payload object for display
+        // prefer parsed payload if present
         if (isObject(match)) {
           const rec = match as Record<string, unknown>;
           if (typeof rec.payload === 'string' && rec.payload.trim()) {
@@ -346,7 +344,7 @@ export default function OrderDetails({ orderId }: { orderId: string }): JSX.Elem
                 return;
               }
             } catch {
-              // ignore parse error
+              // ignore
             }
           } else if (isObject(rec.payload)) {
             if (!canceled) setOrderRaw(rec.payload);
@@ -391,10 +389,10 @@ export default function OrderDetails({ orderId }: { orderId: string }): JSX.Elem
 
     if (typeof v === 'string' || typeof v === 'number') return v;
     if (v instanceof Date) return v;
-    if (isSecondsObject(v)) return { seconds: Number((v as { seconds: number }).seconds) };
+    if (isSecondsObject(v)) return { seconds: Number(v.seconds) };
     if (hasToDate(v)) {
       try {
-        const d = (v as { toDate: () => Date }).toDate();
+        const d = v.toDate();
         if (d instanceof Date && !Number.isNaN(d.getTime())) return d;
       } catch { /* ignore */ }
     }

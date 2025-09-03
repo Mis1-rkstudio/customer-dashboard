@@ -35,6 +35,19 @@ type OrderRow = {
   quantity: number | string;
 };
 
+/* --- small helpers --- */
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null;
+}
+function safeString(v: unknown): string {
+  if (v === null || v === undefined) return '';
+  return String(v).trim();
+}
+function normKey(s: unknown) {
+  return String(s ?? '').trim().toLowerCase();
+}
+
+/* --- FS create helper --- */
 async function createFsDoc(
   collection: 'customers' | 'agents' | 'items',
   body: Record<string, unknown>
@@ -59,7 +72,7 @@ async function createFsDoc(
 export default function OrderForm({
   closeModal,
   refreshOrders,
-  createOrder, // new optional prop
+  createOrder, // optional prop
 }: {
   closeModal?: () => void;
   refreshOrders?: () => void;
@@ -101,7 +114,7 @@ export default function OrderForm({
   const [itemError, setItemError] = useState<string>('');
   const [step1Error, setStep1Error] = useState<string>('');
 
-  const customStyles: StylesConfig<OptionType, false> = {
+  const customStyles: StylesConfig<OptionType | ItemType, false> = {
     control: (provided: CSSObjectWithLabel) => ({
       ...provided,
       backgroundColor: '#1f2937',
@@ -126,10 +139,6 @@ export default function OrderForm({
   /* -------------------------
      Helpers: normalize, merge, find
      ------------------------- */
-  function normKey(s: unknown) {
-    return String(s ?? '').trim().toLowerCase();
-  }
-
   function mergeOptions(primary: OptionType[], secondary: OptionType[]): OptionType[] {
     const map = new Map<string, OptionType>();
     const put = (o: OptionType) => {
@@ -164,9 +173,10 @@ export default function OrderForm({
     if (!res.ok) return [];
     const json = await res.json().catch(() => null);
     if (Array.isArray(json)) return json;
-    if (json && Array.isArray((json as any).rows)) return (json as any).rows;
+    if (isObject(json) && Array.isArray((json as Record<string, unknown>).rows)) return (json as Record<string, unknown>).rows as unknown[];
+    if (isObject(json) && Array.isArray((json as Record<string, unknown>).orders)) return (json as Record<string, unknown>).orders as unknown[];
     // If the endpoint returns an object map, attempt to extract values
-    if (json && typeof json === 'object') return Object.values(json);
+    if (isObject(json)) return Object.values(json);
     return [];
   };
 
@@ -343,7 +353,6 @@ export default function OrderForm({
     try {
       const payload = { Company_Name: name, Email: customerEmail ?? '', Number: customerPhone ?? '' };
       const { id } = await createFsDoc('customers', payload);
-      // match by value (safer than object identity)
       setCustomers((prev) => prev.map((c) => (normKey(c.value) === normKey(optimistic.value) ? { ...c, id } : c)));
     } catch (errUnknown) {
       console.error('create customer error', errUnknown);
@@ -448,7 +457,7 @@ export default function OrderForm({
     setEditingIndex(null);
 
     if (opt && Array.isArray(opt.colors) && opt.colors.length > 0) {
-      setAvailableColors(opt.colors.map(String));
+      setAvailableColors((opt.colors as unknown[]).map(String));
     } else {
       setAvailableColors([]);
     }
@@ -593,10 +602,9 @@ export default function OrderForm({
         orderStatus: isConfirmed ? 'Confirmed' : 'Unconfirmed',
       };
 
-      // If parent provided createOrder, use it (OrdersPage does). Otherwise, fall back to direct API call.
+      // If parent provided createOrder, use it. Otherwise, fall back to direct API call.
       let body: unknown = null;
       if (typeof createOrder === 'function') {
-        // createOrder is expected to throw on error
         body = await createOrder(payload);
       } else {
         const res = await fetch('/api/orders', {
@@ -607,26 +615,56 @@ export default function OrderForm({
         const ct = res.headers.get('content-type') ?? '';
         body = ct.includes('application/json') ? (await res.json().catch(() => null)) : null;
         if (!res.ok) {
-          const serverMsg = body && (body as any).message ? (body as any).message : `HTTP ${res.status}`;
+          const serverMsg = isObject(body) && typeof (body as Record<string, unknown>).message === 'string'
+            ? (body as Record<string, unknown>).message
+            : `HTTP ${res.status}`;
           throw new Error(String(serverMsg));
         }
       }
 
-      // keep existing BigQuery / server error checks (if your createOrder returns similar shape, these still work)
-      if (body) {
-        if ((body as any).bigQueryError) {
-          const details = typeof (body as any).bigQueryError === 'string' ? (body as any).bigQueryError : JSON.stringify((body as any).bigQueryError, null, 2);
+      // If server returned structured error details, show them safely
+      // if (isObject(body)) {
+      //   if ((body as Record<string, unknown>).bigQueryError) {
+      //     const maybeErr = (body as Record<string, unknown>).bigQueryError;
+      //     const details = typeof maybeErr === 'string' ? maybeErr : JSON.stringify(maybeErr, null, 2);
+      //     window.alert(`BigQuery INSERT FAILED — full error details:\n\n${details}`);
+      //     if (typeof refreshOrders === 'function') await refreshOrders();
+      //     if (typeof closeModal === 'function') closeModal();
+      //     return;
+      //   }
+      //   const bigQ = (body as Record<string, unknown>).bigQuery;
+      //   if (isObject(bigQ) && typeof (bigQ as Record<string, unknown>).totalErrors === 'number' && (bigQ as Record<string, unknown>).totalErrors > 0) {
+      //     const summary = JSON.stringify(bigQ, null, 2);
+      //     window.alert(`BigQuery reported ${(bigQ as Record<string, unknown>).totalErrors} row errors. Full summary:\n\n${summary}`);
+      //     if (typeof refreshOrders === 'function') await refreshOrders();
+      //     if (typeof closeModal === 'function') closeModal();
+      //     return;
+      //   }
+      // }
+
+      // If server returned structured error details, show them safely
+      if (isObject(body)) {
+        if ((body as Record<string, unknown>).bigQueryError) {
+          const maybeErr = (body as Record<string, unknown>).bigQueryError;
+          const details = typeof maybeErr === 'string' ? maybeErr : JSON.stringify(maybeErr, null, 2);
           window.alert(`BigQuery INSERT FAILED — full error details:\n\n${details}`);
           if (typeof refreshOrders === 'function') await refreshOrders();
           if (typeof closeModal === 'function') closeModal();
           return;
         }
-        if ((body as any).bigQuery && (body as any).bigQuery.totalErrors && (body as any).bigQuery.totalErrors > 0) {
-          const summary = JSON.stringify((body as any).bigQuery, null, 2);
-          window.alert(`BigQuery reported ${(body as any).bigQuery.totalErrors} row errors. Full summary:\n\n${summary}`);
-          if (typeof refreshOrders === 'function') await refreshOrders();
-          if (typeof closeModal === 'function') closeModal();
-          return;
+
+        // safe narrow for the detailed BigQuery object
+        const bigQ = (body as Record<string, unknown>).bigQuery;
+        if (isObject(bigQ)) {
+          const bqRec = bigQ as Record<string, unknown>;
+          const totalErrors = bqRec.totalErrors;
+          if (typeof totalErrors === 'number' && totalErrors > 0) {
+            const summary = JSON.stringify(bqRec, null, 2);
+            window.alert(`BigQuery reported ${totalErrors} row errors. Full summary:\n\n${summary}`);
+            if (typeof refreshOrders === 'function') await refreshOrders();
+            if (typeof closeModal === 'function') closeModal();
+            return;
+          }
         }
       }
 
@@ -659,7 +697,7 @@ export default function OrderForm({
           {/* Step 1 UI (unchanged) */}
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Customer</label>
-            <CreatableSelect
+            <CreatableSelect<OptionType, false>
               styles={customStyles}
               options={customers}
               value={selectedCustomer}
@@ -686,7 +724,7 @@ export default function OrderForm({
 
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Agent</label>
-            <CreatableSelect
+            <CreatableSelect<OptionType, false>
               styles={customStyles}
               options={agents}
               value={selectedAgent}
@@ -728,8 +766,8 @@ export default function OrderForm({
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">Item</label>
-              <CreatableSelect
-                styles={customStyles as any}
+              <CreatableSelect<ItemType, false>
+                styles={customStyles}
                 options={availableItems}
                 value={currentItem}
                 onChange={(opt) => handleItemChange(opt as ItemType | null)}
