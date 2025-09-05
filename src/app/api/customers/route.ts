@@ -104,7 +104,11 @@ export async function GET() {
     `;
 
     // ✅ Use the correct type for createQueryJob
-    const options: BQQuery = { query: sql, useLegacySql: false };
+    const options: BQQuery = {
+      query: sql,
+      useLegacySql: false,
+      location: process.env.BQ_LOCATION ?? "US",
+    };
 
     const [job] = await bq.createQueryJob(options);
     const [rows] = (await job.getQueryResults()) as [CustomerWithAgentRow[]];
@@ -120,4 +124,3 @@ export async function GET() {
     return NextResponse.json<ApiError>({ error: msg }, { status: 500 });
   }
 }
-
