@@ -26,11 +26,32 @@ interface ApiSuccess { rows: CustomerWithAgentRow[] }
 interface ApiError { error: string }
 
 function makeBQ(): BigQuery {
-  const key = process.env.GCLOUD_SERVICE_KEY;
-  if (key) {
-    const creds = JSON.parse(key);
-    return new BigQuery({ projectId: process.env.BQ_PROJECT || creds.project_id, credentials: creds });
+  // Support either raw JSON in GCLOUD_SERVICE_KEY or base64-encoded JSON in
+  // GCLOUD_SERVICE_KEY_B64. If neither is present we'll fall back to ADC.
+  const raw = process.env.GCLOUD_SERVICE_KEY;
+  const rawB64 = process.env.GCLOUD_SERVICE_KEY_B64;
+
+  if (raw) {
+    try {
+      const creds = JSON.parse(raw);
+      return new BigQuery({ projectId: process.env.BQ_PROJECT ?? creds.project_id, credentials: creds });
+    } catch (e) {
+      console.error('Failed to parse GCLOUD_SERVICE_KEY JSON:', e);
+      // fall through and try other sources
+    }
   }
+
+  if (rawB64) {
+    try {
+      const decoded = Buffer.from(rawB64, 'base64').toString('utf8');
+      const creds = JSON.parse(decoded);
+      return new BigQuery({ projectId: process.env.BQ_PROJECT ?? creds.project_id, credentials: creds });
+    } catch (e) {
+      console.error('Failed to parse GCLOUD_SERVICE_KEY_B64:', e);
+    }
+  }
+
+  // Last resort: rely on Application Default Credentials or the environment
   return new BigQuery({ projectId: process.env.BQ_PROJECT });
 }
 
@@ -47,8 +68,8 @@ export async function GET() {
       return NextResponse.json<ApiError>({ error: 'Missing BQ_PROJECT/BQ_DATASET' }, { status: 500 });
     }
 
-    const C = `\`${project}.${dataset}.${customers}\``;
-    const B = `\`${project}.${dataset}.${brokers}\``;
+    const C = \${project}.${dataset}.${customers}\``;
+    const B = \${project}.${dataset}.${brokers}\``;
 
     const sql = `
       WITH base AS (
@@ -106,7 +127,11 @@ export async function GET() {
 
 
     // ✅ Use the correct type for createQueryJob
-    const options: BQQuery = { query: sql, useLegacySql: false };
+    const options: BQQuery = {
+      query: sql,
+      useLegacySql: false,
+      location: process.env.BQ_LOCATION ?? 'US',
+    };
 
     const [job] = await bq.createQueryJob(options);
     const [rows] = (await job.getQueryResults()) as [CustomerWithAgentRow[]];
