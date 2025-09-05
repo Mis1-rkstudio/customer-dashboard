@@ -24,19 +24,22 @@ export type OrderShape = {
 
 type Props = {
   order: OrderShape;
-  onRefresh?: () => void;
+  onRefresh?: () => void | Promise<void>;
 };
+
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
 
 function formatDateMaybe(raw?: unknown): string {
   if (!raw) return "—";
   try {
-    if (
-      typeof raw === "object" &&
-      raw !== null &&
-      "seconds" in (raw as any) &&
-      typeof (raw as any).seconds === "number"
-    ) {
-      return new Date((raw as any).seconds * 1000).toLocaleString();
+    if (isObject(raw)) {
+      const rec = raw as Record<string, unknown>;
+      const seconds = rec["seconds"];
+      if (typeof seconds === "number") {
+        return new Date(seconds * 1000).toLocaleString();
+      }
     }
     const d = new Date(String(raw));
     if (!isNaN(d.getTime())) return d.toLocaleString();
@@ -46,11 +49,11 @@ function formatDateMaybe(raw?: unknown): string {
   }
 }
 
-export default function OrderCard({ order, onRefresh }: Props) {
+export default function OrderCard({ order, onRefresh }: Props): JSX.Element {
   const [openHistory, setOpenHistory] = useState(false);
   const [actioning, setActioning] = useState<boolean>(false);
 
-  const statusRaw = (order.orderStatus ?? "").toString();
+  const statusRaw = String(order.orderStatus ?? "");
   const status = statusRaw.trim();
   const lc = status.toLowerCase();
 
@@ -73,6 +76,7 @@ export default function OrderCard({ order, onRefresh }: Props) {
         : `Mark this order as ${newStatus}?`
     );
     if (!proceed) return;
+
     setActioning(true);
     try {
       if (
@@ -83,26 +87,46 @@ export default function OrderCard({ order, onRefresh }: Props) {
         const res = await fetch(`/api/orders?${qs.toString()}`, {
           method: "DELETE",
         });
-        if (!res.ok)
-          throw new Error(
-            (await res.json().catch(() => ({} as any))).message ||
-              `HTTP ${res.status}`
-          );
+        if (!res.ok) {
+          // parse JSON safely
+          let body: unknown;
+          try {
+            body = await res.json();
+          } catch {
+            body = {};
+          }
+          const message =
+            isObject(body) &&
+            typeof (body as Record<string, unknown>).message === "string"
+              ? String((body as Record<string, unknown>).message)
+              : `HTTP ${res.status}`;
+          throw new Error(message);
+        }
       } else {
         const res = await fetch("/api/orders", {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ id: order.id, orderStatus: newStatus }),
         });
-        if (!res.ok)
-          throw new Error(
-            (await res.json().catch(() => ({} as any))).message ||
-              `HTTP ${res.status}`
-          );
+        if (!res.ok) {
+          let body: unknown;
+          try {
+            body = await res.json();
+          } catch {
+            body = {};
+          }
+          const message =
+            isObject(body) &&
+            typeof (body as Record<string, unknown>).message === "string"
+              ? String((body as Record<string, unknown>).message)
+              : `HTTP ${res.status}`;
+          throw new Error(message);
+        }
       }
+
+      // allow refresh to be async
       await onRefresh?.();
     } catch (e) {
-      // simple alert for now; you can swap with your toast
       alert(
         "Failed to update status: " +
           (e instanceof Error ? e.message : String(e))
@@ -264,28 +288,28 @@ export default function OrderCard({ order, onRefresh }: Props) {
                 )}
               </div>
 
-              {(order.statusHistory ?? []).map((h, idx) => (
-                <div key={idx} className="p-3 bg-slate-800 rounded">
-                  <div className="flex items-baseline justify-between">
-                    <div className="font-medium">{h?.status}</div>
-                    <div className="text-xs text-slate-400">
-                      {h?.changedAt ? formatDateMaybe(h.changedAt) : ""}
+              {(order.statusHistory ?? []).length > 0 ? (
+                (order.statusHistory ?? []).map((h, idx) => (
+                  <div key={idx} className="p-3 bg-slate-800 rounded">
+                    <div className="flex items-baseline justify-between">
+                      <div className="font-medium">{h.status}</div>
+                      <div className="text-xs text-slate-400">
+                        {h.changedAt ? formatDateMaybe(h.changedAt) : ""}
+                      </div>
                     </div>
+                    {h.changedBy && (
+                      <div className="text-xs text-slate-400">
+                        By: {h.changedBy}
+                      </div>
+                    )}
+                    {h.reason && (
+                      <div className="text-xs text-slate-400">
+                        Reason: {h.reason}
+                      </div>
+                    )}
                   </div>
-                  {h?.changedBy && (
-                    <div className="text-xs text-slate-400">
-                      By: {h.changedBy}
-                    </div>
-                  )}
-                  {h?.reason && (
-                    <div className="text-xs text-slate-400">
-                      Reason: {h.reason}
-                    </div>
-                  )}
-                </div>
-              ))}
-
-              {(order.statusHistory ?? []).length === 0 && (
+                ))
+              ) : (
                 <div className="text-sm text-slate-400">
                   No status updates yet.
                 </div>

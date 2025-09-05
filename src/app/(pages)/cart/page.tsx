@@ -43,10 +43,29 @@ function getGoogleDriveImageSrc(googleDriveUrl?: string | null): string {
   return String(googleDriveUrl);
 }
 
+/** Safe helpers to extract typed fields from unknown/raw structures */
+function getNumberField(obj: unknown, key: string): number {
+  if (!isObject(obj)) return 0;
+  const v = obj[key];
+  return safeNumber(v);
+}
+function getStringField(obj: unknown, key: string): string | undefined {
+  if (!isObject(obj)) return undefined;
+  const v = obj[key];
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
 /** Safely extract available colors from different legacy shapes */
 function getAvailableColors(item: CartItem): string[] {
-  if (Array.isArray(item.colors) && item.colors.length > 0)
-    return item.colors.map((c) => String(c ?? "").trim()).filter(Boolean);
+  if (
+    Array.isArray((item as unknown as Record<string, unknown>).colors) &&
+    ((item as unknown as Record<string, unknown>).colors as unknown[]).length >
+      0
+  ) {
+    return ((item as unknown as Record<string, unknown>).colors as unknown[])
+      .map((c) => String(c ?? "").trim())
+      .filter(Boolean);
+  }
   if (isObject(item.raw)) {
     const raw = item.raw as Record<string, unknown>;
     const ac =
@@ -54,23 +73,33 @@ function getAvailableColors(item: CartItem): string[] {
       raw["availableColors"] ??
       raw["colors"] ??
       raw["Colors"];
-    if (Array.isArray(ac))
-      return ac.map((c) => String(c ?? "").trim()).filter(Boolean);
+    if (Array.isArray(ac)) {
+      return (ac as unknown[])
+        .map((c) => String(c ?? "").trim())
+        .filter(Boolean);
+    }
   }
   return [];
 }
 
 /** Safely return selected colors (supports legacy single selectedColor) */
 function getSelectedColors(item: CartItem): string[] {
-  if (Array.isArray(item.selectedColors))
-    return item.selectedColors.map(String);
+  if (
+    Array.isArray((item as unknown as Record<string, unknown>).selectedColors)
+  ) {
+    return (
+      (item as unknown as Record<string, unknown>).selectedColors as unknown[]
+    ).map(String);
+  }
   if (isObject(item.raw)) {
     const val =
       (item.raw as Record<string, unknown>)["selectedColor"] ??
       (item.raw as Record<string, unknown>)["selected_colors"];
     if (typeof val === "string" && val.trim()) return [val.trim()];
     if (Array.isArray(val))
-      return val.map((c) => String(c ?? "").trim()).filter(Boolean);
+      return (val as unknown[])
+        .map((c) => String(c ?? "").trim())
+        .filter(Boolean);
   }
   return [];
 }
@@ -116,23 +145,36 @@ export default function CartPage(): JSX.Element {
       : Array.isArray(cartItems)
       ? cartItems.reduce(
           (s: number, it: CartItem) =>
-            s + safeNumber(it.set ?? it.quantity ?? 0),
+            s +
+            safeNumber(
+              (it as unknown as Record<string, unknown>).set ??
+                (it as unknown as Record<string, unknown>).quantity ??
+                0
+            ),
           0
         )
       : 0;
 
   // increase / decrease and update helpers (respect selectedColors)
   const inc = (it: CartItem): void => {
-    const cur = safeNumber(it.set ?? it.quantity ?? 0);
+    const cur = safeNumber(
+      (it as unknown as Record<string, unknown>).set ??
+        (it as unknown as Record<string, unknown>).quantity ??
+        0
+    );
     const selectedColors =
-      Array.isArray(it.selectedColors) && it.selectedColors.length > 0
-        ? it.selectedColors
+      Array.isArray(
+        (it as unknown as Record<string, unknown>).selectedColors
+      ) &&
+      ((it as unknown as Record<string, unknown>).selectedColors as unknown[])
+        .length > 0
+        ? ((it as unknown as Record<string, unknown>)
+            .selectedColors as string[])
         : getSelectedColors(it);
     const colorsCount = Math.max(1, selectedColors.length || 1);
-    // available (closingStock + productionQty)
+    // available (closingStock + productionQty) — read safely from item.raw or top-level
     const available =
-      safeNumber((it as any).closingStock) +
-      safeNumber((it as any).productionQty);
+      getNumberField(it, "closingStock") + getNumberField(it, "productionQty");
     // compute total pieces after increment
     const totalAfter = (cur + 1) * colorsCount;
     if (available && totalAfter > available) {
@@ -146,20 +188,28 @@ export default function CartPage(): JSX.Element {
   };
 
   const dec = (it: CartItem): void => {
-    const cur = safeNumber(it.set ?? it.quantity ?? 0);
+    const cur = safeNumber(
+      (it as unknown as Record<string, unknown>).set ??
+        (it as unknown as Record<string, unknown>).quantity ??
+        0
+    );
     updateItem(it.id, { set: Math.max(0, cur - 1) });
   };
 
   const onSetChange = (it: CartItem, v: number | string): void => {
     const n = Math.max(0, Number(v) || 0);
     const selectedColors =
-      Array.isArray(it.selectedColors) && it.selectedColors.length > 0
-        ? it.selectedColors
+      Array.isArray(
+        (it as unknown as Record<string, unknown>).selectedColors
+      ) &&
+      ((it as unknown as Record<string, unknown>).selectedColors as unknown[])
+        .length > 0
+        ? ((it as unknown as Record<string, unknown>)
+            .selectedColors as string[])
         : getSelectedColors(it);
     const colorsCount = Math.max(1, selectedColors.length || 1);
     const available =
-      safeNumber((it as any).closingStock) +
-      safeNumber((it as any).productionQty);
+      getNumberField(it, "closingStock") + getNumberField(it, "productionQty");
     const totalAfter = n * colorsCount;
     if (available && totalAfter > available) {
       alert(`Only ${available} pieces available (requested ${totalAfter}).`);
@@ -173,8 +223,13 @@ export default function CartPage(): JSX.Element {
 
   // toggle a color pill for an item
   const onColorToggle = (it: CartItem, color: string): void => {
-    const prev = Array.isArray(it.selectedColors)
-      ? [...it.selectedColors]
+    const prev = Array.isArray(
+      (it as unknown as Record<string, unknown>).selectedColors
+    )
+      ? [
+          ...((it as unknown as Record<string, unknown>)
+            .selectedColors as string[]),
+        ]
       : getSelectedColors(it);
     const idx = prev.findIndex(
       (c) => String(c).toLowerCase() === String(color).toLowerCase()
@@ -182,11 +237,14 @@ export default function CartPage(): JSX.Element {
     if (idx >= 0) prev.splice(idx, 1);
     else prev.push(color);
     // after toggling, validate sets * colors <= available
-    const sets = safeNumber(it.set ?? it.quantity ?? 0);
+    const sets = safeNumber(
+      (it as unknown as Record<string, unknown>).set ??
+        (it as unknown as Record<string, unknown>).quantity ??
+        0
+    );
     const colorsCount = Math.max(1, prev.length || 1);
     const available =
-      safeNumber((it as any).closingStock) +
-      safeNumber((it as any).productionQty);
+      getNumberField(it, "closingStock") + getNumberField(it, "productionQty");
     if (available && sets * colorsCount > available) {
       // clamp sets to available/colorsCount
       const maxSets = Math.floor(available / colorsCount);
@@ -205,13 +263,22 @@ export default function CartPage(): JSX.Element {
         // validate available for each
         const colorsCount = Math.max(
           1,
-          Array.isArray(it.selectedColors) && it.selectedColors.length > 0
-            ? it.selectedColors.length
+          Array.isArray(
+            (it as unknown as Record<string, unknown>).selectedColors
+          ) &&
+            (
+              (it as unknown as Record<string, unknown>)
+                .selectedColors as unknown[]
+            ).length > 0
+            ? (
+                (it as unknown as Record<string, unknown>)
+                  .selectedColors as unknown[]
+              ).length
             : getAvailableColors(it).length || 1
         );
         const avail =
-          safeNumber((it as any).closingStock) +
-          safeNumber((it as any).productionQty);
+          getNumberField(it, "closingStock") +
+          getNumberField(it, "productionQty");
         if (avail && n * colorsCount > avail) {
           const maxSets = Math.floor(avail / colorsCount);
           updateItem(it.id, { set: Math.max(0, maxSets) });
@@ -242,22 +309,38 @@ export default function CartPage(): JSX.Element {
   // build order & place (kept from your original placeOrder behavior)
   function buildOrderShapeFromResponse(
     orderId: string | undefined,
-    customerPayload: any,
-    itemsPayload: any[]
+    customerPayload: Record<string, unknown> | null,
+    itemsPayload: Record<string, unknown>[]
   ): OrderShape {
     const itemsForShare = (itemsPayload || []).map((r) => {
+      const qty = safeNumber(
+        (r as Record<string, unknown>)["qty"] ??
+          (r as Record<string, unknown>)["quantity"] ??
+          (r as Record<string, unknown>)["sets"] ??
+          0
+      );
+      const color = (r as Record<string, unknown>)["color"];
       return {
-        itemName: r.itemName ?? r.sku ?? r.label ?? String(r.itemName ?? ""),
-        color: String(r.color ?? ""),
-        quantity: Number(r.qty ?? r.quantity ?? r.sets ?? 0) || 0,
+        itemName: String(
+          (r as Record<string, unknown>)["itemName"] ??
+            (r as Record<string, unknown>)["sku"] ??
+            (r as Record<string, unknown>)["label"] ??
+            ""
+        ),
+        color: typeof color === "string" ? color : "",
+        quantity: qty,
       };
     });
+
     const order: OrderShape = {
       id: orderId,
       customer: {
-        name: customerPayload?.label ?? customerPayload?.name ?? "",
-        phone: (customerPayload?.phone ?? "") as string,
-        email: (customerPayload?.email ?? "") as string,
+        name:
+          (customerPayload &&
+            String(customerPayload?.label ?? customerPayload?.name ?? "")) ??
+          "",
+        phone: (customerPayload && String(customerPayload?.phone ?? "")) ?? "",
+        email: (customerPayload && String(customerPayload?.email ?? "")) ?? "",
       },
       agent: { name: "", number: "", email: "" },
       items: itemsForShare,
@@ -280,14 +363,21 @@ export default function CartPage(): JSX.Element {
 
     setPlacing(true);
     try {
-      const itemsPayload: any[] = [];
+      const itemsPayload: Record<string, unknown>[] = [];
       for (const it of cartItems) {
-        const qty = safeNumber(it.set ?? it.quantity ?? 0);
-        const selectedColors: string[] = Array.isArray(it.selectedColors)
-          ? it.selectedColors
+        const qty = safeNumber(
+          (it as unknown as Record<string, unknown>).set ??
+            (it as unknown as Record<string, unknown>).quantity ??
+            0
+        );
+        const selectedColors: string[] = Array.isArray(
+          (it as unknown as Record<string, unknown>).selectedColors
+        )
+          ? ((it as unknown as Record<string, unknown>)
+              .selectedColors as string[])
           : getSelectedColors(it);
         const baseSku = it.id ?? undefined;
-        const base: any = {
+        const base: Record<string, unknown> = {
           sku: baseSku,
           raw: it.raw ?? null,
           itemName: getItemLabel(it) || undefined,
@@ -311,7 +401,7 @@ export default function CartPage(): JSX.Element {
         (user?.username as string | undefined) ??
         (emailAddr as string | undefined) ??
         "Customer";
-      const customerPayload = {
+      const customerPayload: Record<string, unknown> = {
         label: userName,
         email: (emailAddr as string) ?? null,
         phone: null,
@@ -464,16 +554,21 @@ export default function CartPage(): JSX.Element {
               </div>
             ) : (
               cartItems.map((item: CartItem) => {
-                const qty = safeNumber(item.set ?? item.quantity ?? 0);
+                const qty = safeNumber(
+                  (item as unknown as Record<string, unknown>).set ??
+                    (item as unknown as Record<string, unknown>).quantity ??
+                    0
+                );
                 const selectedColors: string[] = Array.isArray(
-                  item.selectedColors
+                  (item as unknown as Record<string, unknown>).selectedColors
                 )
-                  ? item.selectedColors
+                  ? ((item as unknown as Record<string, unknown>)
+                      .selectedColors as string[])
                   : getSelectedColors(item);
                 const colors: string[] = getAvailableColors(item);
                 const available =
-                  safeNumber((item as any).closingStock) +
-                  safeNumber((item as any).productionQty);
+                  getNumberField(item, "closingStock") +
+                  getNumberField(item, "productionQty");
 
                 const totalPieces = Math.max(
                   0,
@@ -499,10 +594,18 @@ export default function CartPage(): JSX.Element {
                         <Image
                           src={
                             googleDriveImage(
-                              item.image ?? item.image_url ?? null
+                              (item as unknown as Record<string, unknown>)
+                                .image ??
+                                (item as unknown as Record<string, unknown>)
+                                  .image_url ??
+                                null
                             )
                               ? getGoogleDriveImageSrc(
-                                  item.image ?? item.image_url ?? null
+                                  (item as unknown as Record<string, unknown>)
+                                    .image ??
+                                    (item as unknown as Record<string, unknown>)
+                                      .image_url ??
+                                    null
                                 )
                               : "/placeholder.svg"
                           }
@@ -519,19 +622,27 @@ export default function CartPage(): JSX.Element {
                         </h2>
 
                         <div className="mt-2 text-sm text-slate-300 flex flex-wrap gap-4">
-                          {item.concept && (
+                          {(item as unknown as Record<string, unknown>)
+                            .concept && (
                             <span className="text-slate-300">
                               <span className="text-slate-400">Concept:</span>{" "}
                               <span className="font-medium text-white">
-                                {item.concept}
+                                {
+                                  (item as unknown as Record<string, unknown>)
+                                    .concept
+                                }
                               </span>
                             </span>
                           )}
-                          {item.fabric && (
+                          {(item as unknown as Record<string, unknown>)
+                            .fabric && (
                             <span className="text-slate-300">
                               <span className="text-slate-400">Fabric:</span>{" "}
                               <span className="font-medium text-white">
-                                {item.fabric}
+                                {
+                                  (item as unknown as Record<string, unknown>)
+                                    .fabric
+                                }
                               </span>
                             </span>
                           )}
