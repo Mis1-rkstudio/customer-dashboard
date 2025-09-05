@@ -1,6 +1,7 @@
 // app/api/orders/route.ts
 import { NextResponse } from 'next/server';
 import { BigQuery } from '@google-cloud/bigquery';
+import { getBQClient } from '@/server/bq-handler';
 
 type RawRecord = Record<string, unknown>;
 type NormalizedItemRow = { sku: string; itemName: string; color: string; quantity: number };
@@ -16,7 +17,8 @@ const BQ_DATASET_ID = process.env.BQ_DATASET_ID || 'frono_2025';
 const BQ_TABLE_ID = process.env.BQ_TABLE_ID || 'orders';
 const DEFAULT_LIMIT = 500;
 
-const bigquery = new BigQuery({ projectId: BQ_PROJECT_ID });
+// Use shared client with robust credential loading (env/file/ADC)
+const bigquery = getBQClient();
 
 /** ========== small helpers ========== */
 function isObject(v: unknown): v is Record<string, unknown> {

@@ -1,8 +1,9 @@
 // app/api/customers/route.ts
-import { NextResponse } from 'next/server';
-import { BigQuery, type Query as BQQuery } from '@google-cloud/bigquery';
+import { NextResponse } from "next/server";
+import { type Query as BQQuery } from "@google-cloud/bigquery";
+import { getBQClient } from "@/server/bq-handler";
 
-export const runtime = 'nodejs';
+export const runtime = "nodejs";
 
 type Nil<T> = T | null | undefined;
 
@@ -22,33 +23,31 @@ export interface CustomerWithAgentRow {
   Agent_Number?: Nil<string>;
 }
 
-interface ApiSuccess { rows: CustomerWithAgentRow[] }
-interface ApiError { error: string }
-
-function makeBQ(): BigQuery {
-  const key = process.env.GCLOUD_SERVICE_KEY;
-  if (key) {
-    const creds = JSON.parse(key);
-    return new BigQuery({ projectId: process.env.BQ_PROJECT || creds.project_id, credentials: creds });
-  }
-  return new BigQuery({ projectId: process.env.BQ_PROJECT });
+interface ApiSuccess {
+  rows: CustomerWithAgentRow[];
+}
+interface ApiError {
+  error: string;
 }
 
-const bq = makeBQ();
+const bq = getBQClient();
 
 export async function GET() {
   try {
-    const project = process.env.BQ_PROJECT!;
-    const dataset = process.env.BQ_DATASET!;
-    const customers = process.env.BQ_CUSTOMERS_TABLE ?? 'kolkata_customer';
-    const brokers = process.env.BQ_TABLE_AGENTS ?? 'kolkata_broker';
+    const project = process.env.BQ_PROJECT || process.env.BQ_PROJECT_ID || "";
+    const dataset = process.env.BQ_DATASET || process.env.BQ_DATASET_ID || "";
+    const customers = process.env.BQ_CUSTOMERS_TABLE ?? "kolkata_customer";
+    const brokers = process.env.BQ_TABLE_AGENTS ?? "kolkata_broker";
 
     if (!project || !dataset) {
-      return NextResponse.json<ApiError>({ error: 'Missing BQ_PROJECT/BQ_DATASET' }, { status: 500 });
+      return NextResponse.json<ApiError>(
+        { error: "Missing BQ_PROJECT/BQ_DATASET" },
+        { status: 500 }
+      );
     }
 
-    const C = `\`${project}.${dataset}.${customers}\``;
-    const B = `\`${project}.${dataset}.${brokers}\``;
+    const C = `${project}.${dataset}.${customers}`;
+    const B = `${project}.${dataset}.${brokers}`;
 
     const sql = `
       WITH base AS (
@@ -104,7 +103,6 @@ export async function GET() {
       ORDER BY b.Company_Name
     `;
 
-
     // ✅ Use the correct type for createQueryJob
     const options: BQQuery = { query: sql, useLegacySql: false };
 
@@ -114,8 +112,12 @@ export async function GET() {
     return NextResponse.json<ApiSuccess>({ rows }, { status: 200 });
   } catch (err: unknown) {
     const anyErr = err as { errors?: { message?: string }[]; message?: string };
-    const msg = anyErr?.errors?.[0]?.message || anyErr?.message || 'BigQuery query failed';
-    console.error('BQ customers join error:', err);
+    const msg =
+      anyErr?.errors?.[0]?.message ||
+      anyErr?.message ||
+      "BigQuery query failed";
+    console.error("BQ customers join error:", err);
     return NextResponse.json<ApiError>({ error: msg }, { status: 500 });
   }
 }
+

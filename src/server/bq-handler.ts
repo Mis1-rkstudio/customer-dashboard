@@ -11,9 +11,9 @@ type ServiceAccount = {
   [k: string]: unknown; // allow other fields but don't use `any`
 };
 
-type FileLoad =
-  | { useADC: true; path: string }
-  | { useADC: false; credentials: ServiceAccount; path: string }
+type CredLoad =
+  | { useADC: true; path?: string }
+  | { useADC: false; credentials: ServiceAccount; source: 'env' | 'file' }
   | null;
 
 /** cached BigQuery client to reuse across invocations */
@@ -29,7 +29,33 @@ function looksLikeServiceAccount(v: unknown): v is ServiceAccount {
   return typeof maybe.client_email === 'string' && typeof maybe.private_key === 'string';
 }
 
-function loadCredentialsFromFile(): FileLoad {
+function loadCredentials(): CredLoad {
+  // Prefer explicit JSON provided via env var (GCLOUD_SERVICE_KEY)
+  const keyEnv = process.env.GCLOUD_SERVICE_KEY;
+  if (keyEnv) {
+    try {
+      // Try direct JSON first
+      const parsed = JSON.parse(keyEnv);
+      if (!looksLikeServiceAccount(parsed)) {
+        throw new Error('Env JSON does not look like service account');
+      }
+      return { useADC: false, credentials: parsed as ServiceAccount, source: 'env' };
+    } catch (_) {
+      // If not JSON, try base64 -> JSON
+      try {
+        const buf = Buffer.from(keyEnv, 'base64');
+        const decoded = buf.toString('utf8');
+        const parsed = JSON.parse(decoded);
+        if (!looksLikeServiceAccount(parsed)) {
+          throw new Error('Decoded JSON does not look like service account');
+        }
+        return { useADC: false, credentials: parsed as ServiceAccount, source: 'env' };
+      } catch (e) {
+        throw new Error('GCLOUD_SERVICE_KEY is neither JSON nor base64-encoded JSON');
+      }
+    }
+  }
+
   const keyFileEnv = process.env.GCLOUD_KEY_FILE;
   const adcEnv = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
@@ -48,7 +74,7 @@ function loadCredentialsFromFile(): FileLoad {
     if (!looksLikeServiceAccount(parsed)) {
       throw new Error('Credential JSON does not look like a service account (missing client_email/private_key)');
     }
-    return { useADC: false, credentials: parsed as ServiceAccount, path: candidate };
+    return { useADC: false, credentials: parsed as ServiceAccount, source: 'file' };
   } catch (errUnknown) {
     const msg = errUnknown instanceof Error ? errUnknown.message : String(errUnknown);
     throw new Error(`Invalid JSON in key file at ${candidate}: ${msg}`);
@@ -62,18 +88,18 @@ function loadCredentialsFromFile(): FileLoad {
 export function getBQClient(): BigQuery {
   if (cachedClient) return cachedClient;
 
-  const projectId = process.env.BQ_PROJECT;
-  if (!projectId) throw new Error('Missing required env var BQ_PROJECT');
+  const projectId = process.env.BQ_PROJECT || process.env.BQ_PROJECT_ID;
+  if (!projectId) throw new Error('Missing required env var BQ_PROJECT (or BQ_PROJECT_ID)');
 
-  const fileLoad = loadCredentialsFromFile();
-  if (fileLoad === null) {
+  const credLoad = loadCredentials();
+  if (credLoad === null) {
     throw new Error(
       'No credentials found. Set GOOGLE_APPLICATION_CREDENTIALS to a service-account JSON, ' +
-      'or set GCLOUD_KEY_FILE (or place bigquery_key.json in project root).'
+      'or set GCLOUD_SERVICE_KEY to JSON (or base64 JSON), or set GCLOUD_KEY_FILE (or place bigquery_key.json in project root).'
     );
   }
 
-  if (fileLoad.useADC) {
+  if (credLoad.useADC) {
     cachedClient = new BigQuery({ projectId });
     return cachedClient;
   }
@@ -82,8 +108,8 @@ export function getBQClient(): BigQuery {
   cachedClient = new BigQuery({
     projectId,
     credentials: {
-      client_email: fileLoad.credentials.client_email,
-      private_key: fileLoad.credentials.private_key,
+      client_email: credLoad.credentials.client_email,
+      private_key: credLoad.credentials.private_key,
     },
   });
 
