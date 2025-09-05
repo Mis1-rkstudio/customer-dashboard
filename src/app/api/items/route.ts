@@ -1,35 +1,44 @@
-// app/api/customers/route.ts
-import { NextResponse } from 'next/server';
-import { BigQuery, type Query as BQQuery } from '@google-cloud/bigquery';
+// app/api/items/route.ts
+import { NextResponse } from "next/server";
+import { BigQuery, type Query as BQQuery } from "@google-cloud/bigquery";
 
-export const runtime = 'nodejs';
+export const runtime = "nodejs";
 
 type Nil<T> = T | null | undefined;
 
-export interface CustomerWithAgentRow {
-  Company_Name: string;
-  Cust_Ved_Type?: Nil<string>;
-  Area?: Nil<string>;
-  City?: Nil<string>;
-  State?: Nil<string>;
-  Outstanding?: Nil<number>;
-  Type?: Nil<string>;
-  Broker?: Nil<string>;
-  Contact_Name?: Nil<string>;
-  Number?: Nil<string>;
-  Created_Date?: Nil<string>;
-  Agent_Name?: Nil<string>;
-  Agent_Number?: Nil<string>;
+export interface ItemRow {
+  Item?: string;
+  Colors?: string[] | null;
+  Sizes?: string[] | null;
+  Opening_Stock?: Nil<number>;
+  Stock_In?: Nil<number>;
+  Stock_Out?: Nil<number>;
+  Closing_Stock?: Nil<number>;
+  Reserved?: Nil<number>;
+  Available?: Nil<number>;
+  File_URL?: Nil<string>;
+  Product_Code?: Nil<string>;
+  Concept?: Nil<string>;
+  Fabric?: Nil<string>;
+  FileId?: Nil<string>;
+  Thumbnail_URL?: Nil<string>;
 }
 
-interface ApiSuccess { rows: CustomerWithAgentRow[] }
-interface ApiError { error: string }
+interface ApiSuccess {
+  rows: ItemRow[];
+}
+interface ApiError {
+  error: string;
+}
 
 function makeBQ(): BigQuery {
   const key = process.env.GCLOUD_SERVICE_KEY;
   if (key) {
     const creds = JSON.parse(key);
-    return new BigQuery({ projectId: process.env.BQ_PROJECT || creds.project_id, credentials: creds });
+    return new BigQuery({
+      projectId: process.env.BQ_PROJECT || creds.project_id,
+      credentials: creds,
+    });
   }
   return new BigQuery({ projectId: process.env.BQ_PROJECT });
 }
@@ -42,15 +51,19 @@ export async function GET() {
     const dataset = process.env.BQ_DATASET!;
 
     if (!project || !dataset) {
-      return NextResponse.json<ApiError>({ error: 'Missing BQ_PROJECT/BQ_DATASET' }, { status: 500 });
+      return NextResponse.json<ApiError>(
+        { error: "Missing BQ_PROJECT / BQ_DATASET" },
+        { status: 500 }
+      );
     }
 
-    const detailsDataset = process.env.BQ_DETAILS_DATASET || 'frono';
-
-    const stockTable = `\`${process.env.BQ_PROJECT}.${dataset}.kolkata_stock\``;
-    const detailsTable = `\`${process.env.BQ_PROJECT}.${detailsDataset}.Sample_details\``;
+    // fully-qualified table names
+    const stockTable = `\`${project}.${dataset}.kolkata_stock\``;
+    const detailsTable = `\`${project}.frono.Sample_details\``;
+    const reservationsTable = `\`${project}.${dataset}.orders_reservations\``;
 
     const query = `
+      -- aggregate raw stock rows by Item, collect colors/sizes and sums
       WITH grouped AS (
         SELECT
           Item,
@@ -62,6 +75,16 @@ export async function GET() {
           SUM(COALESCE(SAFE_CAST(Closing_Stock AS INT64), 0)) AS Closing_Stock
         FROM ${stockTable}
         GROUP BY Item
+      ),
+
+      -- aggregate reservations per item (only those with status 'reserved')
+      reserved AS (
+        SELECT
+          TRIM(itemName) AS itemName,
+          SUM(COALESCE(SAFE_CAST(reservedQty AS INT64), 0)) AS reserved_total
+        FROM ${reservationsTable}
+        WHERE LOWER(IFNULL(status, '')) = 'reserved'
+        GROUP BY TRIM(itemName)
       )
 
       SELECT
@@ -84,6 +107,10 @@ export async function GET() {
         g.Stock_Out,
         g.Closing_Stock,
 
+        -- reservation-aware numbers (previous behavior you requested):
+        IFNULL(r.reserved_total, 0) AS Reserved,
+        GREATEST(g.Closing_Stock - IFNULL(r.reserved_total, 0), 0) AS Available,
+
         REPLACE(ANY_VALUE(s.File_URL), '/view?usp=drivesdk', '') AS File_URL,
 
         ANY_VALUE(s.Product_Code) AS Product_Code,
@@ -100,6 +127,8 @@ export async function GET() {
       FROM grouped g
       LEFT JOIN ${detailsTable} s
         ON TRIM(g.Item) = TRIM(s.Product_Code)
+      LEFT JOIN reserved r
+        ON TRIM(g.Item) = TRIM(r.itemName)
       GROUP BY
         g.Item,
         g.Opening_Stock,
@@ -107,21 +136,24 @@ export async function GET() {
         g.Stock_Out,
         g.Closing_Stock,
         g.color_arr,
-        g.size_arr
+        g.size_arr,
+        r.reserved_total
       ORDER BY g.Item
     `;
 
-    // ✅ Use the correct type for createQueryJob
     const options: BQQuery = { query: query, useLegacySql: false };
 
     const [job] = await bq.createQueryJob(options);
-    const [rows] = (await job.getQueryResults()) as [CustomerWithAgentRow[]];
+    const [rows] = (await job.getQueryResults()) as [ItemRow[]];
 
     return NextResponse.json<ApiSuccess>({ rows }, { status: 200 });
   } catch (err: unknown) {
     const anyErr = err as { errors?: { message?: string }[]; message?: string };
-    const msg = anyErr?.errors?.[0]?.message || anyErr?.message || 'BigQuery query failed';
-    console.error('BQ customers join error:', err);
+    const msg =
+      anyErr?.errors?.[0]?.message ||
+      anyErr?.message ||
+      "BigQuery query failed";
+    console.error("BQ items/reservations join error:", err);
     return NextResponse.json<ApiError>({ error: msg }, { status: 500 });
   }
 }

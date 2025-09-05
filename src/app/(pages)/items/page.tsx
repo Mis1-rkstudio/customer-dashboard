@@ -1,10 +1,10 @@
-'use client';
+"use client";
 
-import React, { JSX, useEffect, useMemo, useRef, useState } from 'react';
-import Select, { StylesConfig, OnChangeValue } from 'react-select';
-import { Tag, Zap } from 'lucide-react';
-import { useCart } from '@/context/CartContext';
-import Image from 'next/image';
+import React, { JSX, useEffect, useMemo, useRef, useState } from "react";
+import Select, { StylesConfig, OnChangeValue } from "react-select";
+import { Tag, Zap } from "lucide-react";
+import { useCart } from "@/context/CartContext";
+import Image from "next/image";
 
 type Option = { value: string; label: string };
 
@@ -17,11 +17,14 @@ type ItemRow = {
   concept?: string | null;
   fabric?: string | null;
   closingStock?: number | null;
+  reserved?: number | null;
+  available?: number | null;
   in_production?: boolean;
+  productionQty?: number | null;
 };
 
 type ApiRow = Record<string, unknown>;
-type ApiPayload = unknown; // can be array of rows or { rows: [...] }
+type ApiPayload = unknown;
 
 type CartAddItem = {
   id: string;
@@ -29,125 +32,137 @@ type CartAddItem = {
   image: string;
   colors: string[];
   raw?: Record<string, unknown>;
+  set?: number;
+  selectedColors?: string[];
+  productionQty?: number | null;
+  closingStock?: number | null;
 };
 
 type CartContextMinimal = {
   addToCart: (item: CartAddItem) => void;
-  // expand this type if you need other methods from your actual context
 };
 
 function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null;
+  return typeof v === "object" && v !== null;
 }
 
 function getRowsFromPayload(payload: unknown): unknown[] {
   if (Array.isArray(payload)) return payload as unknown[];
-  if (isObject(payload) && Array.isArray(payload['rows'])) return payload['rows'] as unknown[];
+  if (isObject(payload) && Array.isArray(payload["rows"]))
+    return payload["rows"] as unknown[];
   return [];
 }
 
-// function getCleanFileUrl(fileUrl?: string): string | null {
-//   if (!fileUrl) return null;
-//   try {
-//     return String(fileUrl).replace(/\/view\?usp=.*$/i, '');
-//   } catch {
-//     return null;
-//   }
-// }
-
-/**
- * Normalize various file URL shapes (most importantly Google Drive links)
- * into a direct URL suitable for <img> / next/image.
- *
- * Returns null when no usable file URL can be produced.
- */
 function getCleanFileUrl(fileUrl?: string): string | null {
   if (!fileUrl) return null;
   try {
     const s = String(fileUrl).trim();
     if (!s) return null;
-
-    // 1) canonicalize Google Drive share links:
-    // - https://drive.google.com/file/d/<FILEID>/view?usp=sharing
-    // - https://drive.google.com/open?id=<FILEID>
-    // - https://docs.google.com/uc?export=download&id=<FILEID>
-    // -> normalize to: https://drive.google.com/uc?export=view&id=<FILEID>
     const driveFileMatch = s.match(/\/file\/d\/([a-zA-Z0-9_-]{10,})/i);
     if (driveFileMatch && driveFileMatch[1]) {
       const id = driveFileMatch[1];
       return `https://drive.google.com/uc?export=view&id=${id}`;
     }
-
     const driveOpenMatch = s.match(/[?&]id=([a-zA-Z0-9_-]{10,})/i);
-    if (driveOpenMatch && driveOpenMatch[1] && s.includes('drive.google.com')) {
+    if (driveOpenMatch && driveOpenMatch[1] && s.includes("drive.google.com")) {
       const id = driveOpenMatch[1];
       return `https://drive.google.com/uc?export=view&id=${id}`;
     }
-
-    // 2) If it's already a docs/uc direct link, return it
-    if (s.includes('drive.google.com/uc') || s.includes('googleusercontent.com')) {
+    if (
+      s.includes("drive.google.com/uc") ||
+      s.includes("googleusercontent.com")
+    )
       return s;
-    }
-
-    // 3) convert some "view?usp=sharing" style links by removing query parts
-    // (useful for generic file hosts where removing query shows the file)
-    const withoutView = s.replace(/\/view(\?.*)?$/i, '');
+    const withoutView = s.replace(/\/view(\?.*)?$/i, "");
     if (withoutView !== s) return withoutView;
-
-    // 4) If the link ends with a typical image extension, keep it
     if (/\.(jpe?g|png|gif|webp|avif|svg)(\?.*)?$/i.test(s)) return s;
-
-    // 5) fallback: return original string but only if it looks like an http(s) url
     if (/^https?:\/\//i.test(s)) return s;
-
     return null;
   } catch {
     return null;
   }
 }
 
-
-function classifyStock(qty: number | null | undefined): 'low' | 'medium' | 'high' | 'unknown' {
-  if (qty === null || qty === undefined) return 'unknown';
+function classifyStock(
+  qty: number | null | undefined
+): "low" | "medium" | "high" | "unknown" {
+  if (qty === null || qty === undefined) return "unknown";
   const n = Number(qty);
-  if (Number.isNaN(n)) return 'unknown';
-  if (n <= 4) return 'low';
-  if (n <= 24) return 'medium';
-  return 'high';
+  if (Number.isNaN(n)) return "unknown";
+  if (n <= 4) return "low";
+  if (n <= 24) return "medium";
+  return "high";
 }
 function stockMeta(qty: number | null | undefined) {
   const cls = classifyStock(qty);
-  if (cls === 'low') return { label: 'Low stock', shortLabel: 'Low', colorClass: 'bg-red-600 text-white' };
-  if (cls === 'medium') return { label: 'Medium stock', shortLabel: 'Medium', colorClass: 'bg-orange-500 text-white' };
-  if (cls === 'high') return { label: 'In stock', shortLabel: 'In stock', colorClass: 'bg-green-600 text-white' };
-  return { label: 'Unknown', shortLabel: 'Unknown', colorClass: 'bg-gray-600 text-white' };
+  if (cls === "low")
+    return {
+      label: "Low stock",
+      shortLabel: "Low",
+      colorClass: "bg-red-600 text-white",
+    };
+  if (cls === "medium")
+    return {
+      label: "Medium stock",
+      shortLabel: "Medium",
+      colorClass: "bg-orange-500 text-white",
+    };
+  if (cls === "high")
+    return {
+      label: "In stock",
+      shortLabel: "In stock",
+      colorClass: "bg-green-600 text-white",
+    };
+  return {
+    label: "Unknown",
+    shortLabel: "Unknown",
+    colorClass: "bg-gray-600 text-white",
+  };
 }
 
 const selectStyles: StylesConfig<Option, true> = {
   control: (provided) => ({
     ...provided,
-    background: '#0f1724',
-    borderColor: '#243047',
+    background: "#0f1724",
+    borderColor: "#243047",
     minHeight: 40,
-    color: '#e5e7eb',
+    color: "#e5e7eb",
   }),
-  menu: (provided) => ({ ...provided, background: '#0f1724', color: '#e5e7eb' }),
+  menu: (provided) => ({
+    ...provided,
+    background: "#0f1724",
+    color: "#e5e7eb",
+  }),
   option: (provided, state) => ({
     ...provided,
-    background: state.isSelected ? '#153f63' : state.isFocused ? '#132f44' : '#0f1724',
-    color: '#e5e7eb',
+    background: state.isSelected
+      ? "#153f63"
+      : state.isFocused
+      ? "#132f44"
+      : "#0f1724",
+    color: "#e5e7eb",
   }),
-  singleValue: (provided) => ({ ...provided, color: '#e5e7eb' }),
-  input: (provided) => ({ ...provided, color: '#e5e7eb' }),
-  placeholder: (provided) => ({ ...provided, color: '#94a3b8' }),
-  multiValue: (provided) => ({ ...provided, background: '#1f2937', color: '#e5e7eb' }),
-  multiValueLabel: (provided) => ({ ...provided, color: '#e5e7eb' }),
-  multiValueRemove: (provided) => ({ ...provided, color: '#94a3b8', ':hover': { background: '#374151', color: 'white' } }),
+  singleValue: (provided) => ({ ...provided, color: "#e5e7eb" }),
+  input: (provided) => ({ ...provided, color: "#e5e7eb" }),
+  placeholder: (provided) => ({ ...provided, color: "#94a3b8" }),
+  multiValue: (provided) => ({
+    ...provided,
+    background: "#1f2937",
+    color: "#e5e7eb",
+  }),
+  multiValueLabel: (provided) => ({ ...provided, color: "#e5e7eb" }),
+  multiValueRemove: (provided) => ({
+    ...provided,
+    color: "#94a3b8",
+    ":hover": { background: "#374151", color: "white" },
+  }),
 };
 
 function toOptions(arr?: string[]): Option[] {
   if (!arr || !Array.isArray(arr)) return [];
-  const uniq = Array.from(new Set(arr.map((s) => String(s || '').trim()).filter(Boolean))).sort();
+  const uniq = Array.from(
+    new Set(arr.map((s) => String(s || "").trim()).filter(Boolean))
+  ).sort();
   return uniq.map((v) => ({ value: v, label: v }));
 }
 
@@ -166,13 +181,21 @@ export default function ItemsPage(): JSX.Element {
   const { addToCart } = useCart() as CartContextMinimal;
   const [addedMap, setAddedMap] = useState<Record<string, boolean>>({});
 
+  // per-card UI state: set count and selected colors
+  const [setsMap, setSetsMap] = useState<Record<string, number>>({});
+  const [cardSelectedColors, setCardSelectedColors] = useState<
+    Record<string, string[]>
+  >({});
+
   // search + filters
-  const [searchText, setSearchText] = useState<string>('');
+  const [searchText, setSearchText] = useState<string>("");
   const debouncedSearch = useDebounced(searchText, 250);
   const [selectedConcepts, setSelectedConcepts] = useState<Option[]>([]);
   const [selectedFabrics, setSelectedFabrics] = useState<Option[]>([]);
   const [selectedColors, setSelectedColors] = useState<Option[]>([]);
-  const [stockFilter, setStockFilter] = useState<'all' | 'low' | 'medium' | 'high'>('all');
+  const [stockFilter, setStockFilter] = useState<
+    "all" | "low" | "medium" | "high"
+  >("all");
 
   // pagination
   const [pageSize] = useState<number>(12);
@@ -197,10 +220,10 @@ export default function ItemsPage(): JSX.Element {
     async function fetchItems(): Promise<void> {
       setIsLoading(true);
       try {
-        const res = await fetch('/api/items');
+        const res = await fetch("/api/items");
         const text = await res.text();
         if (!res.ok) {
-          console.error('Failed to fetch items', res.status, text);
+          console.error("Failed to fetch items", res.status, text);
           if (!canceled) {
             setItems([]);
             setItemsLoaded(true);
@@ -212,26 +235,85 @@ export default function ItemsPage(): JSX.Element {
         try {
           payload = JSON.parse(text) as ApiPayload;
         } catch {
-          // fallback: maybe server returned raw JSON already stringified
           payload = text as ApiPayload;
         }
 
         const rawList: unknown[] = getRowsFromPayload(payload);
 
         const normalized: ItemRow[] = rawList.map((r: unknown) => {
-          const rec = (typeof r === 'object' && r !== null) ? (r as ApiRow) : {};
-          const idCandidate = rec['Item'] ?? rec['Product_Code'] ?? rec['product_code'] ?? '';
-          const id = String(idCandidate ?? '').trim();
-          const name = String(rec['Item'] ?? rec['Product_Code'] ?? id).trim();
-          const colors = Array.isArray(rec['Colors']) ? (rec['Colors'] as unknown[]).map((c) => String(c ?? '').trim()).filter(Boolean) : [];
-          const thumbnail = (rec['Thumbnail_URL'] ?? rec['thumbnail'] ?? null) as string | null;
-          const rawFileUrl = (rec['File_URL'] ?? rec['FileUrl'] ?? rec['file_url'] ?? rec['FileUrl_raw']) as string | undefined;
+          const rec = typeof r === "object" && r !== null ? (r as ApiRow) : {};
+          const idCandidate =
+            rec["Item"] ?? rec["Product_Code"] ?? rec["product_code"] ?? "";
+          const id = String(idCandidate ?? "").trim();
+          const name = String(rec["Item"] ?? rec["Product_Code"] ?? id).trim();
+          const colors = Array.isArray(rec["Colors"])
+            ? (rec["Colors"] as unknown[])
+                .map((c) => String(c ?? "").trim())
+                .filter(Boolean)
+            : [];
+          const thumbnail = (rec["Thumbnail_URL"] ??
+            rec["thumbnail"] ??
+            rec["thumbnail_url"] ??
+            null) as string | null;
+          const rawFileUrl = (rec["File_URL"] ??
+            rec["FileUrl"] ??
+            rec["file_url"] ??
+            rec["FileUrl_raw"]) as string | undefined;
           const fileUrl = getCleanFileUrl(rawFileUrl);
           const image = (fileUrl || thumbnail) ?? null;
-          const concept = (rec['Concept'] ?? rec['Concept_2'] ?? rec['Concept_1'] ?? null) as string | null;
-          const fabric = (rec['Fabric'] ?? rec['Concept_3'] ?? null) as string | null;
-          const closingStockRaw = rec['Closing_Stock'] ?? rec['ClosingStock'] ?? rec['closing_stock'] ?? null;
-          const closingStockNum = closingStockRaw === null ? null : Number(closingStockRaw);
+          const concept = (rec["Concept"] ??
+            rec["Concept_2"] ??
+            rec["Concept_1"] ??
+            null) as string | null;
+          const fabric = (rec["Fabric"] ?? rec["Concept_3"] ?? null) as
+            | string
+            | null;
+
+          const closingStockRaw =
+            rec["Closing_Stock"] ??
+            rec["ClosingStock"] ??
+            rec["closing_stock"] ??
+            rec["Closing"] ??
+            null;
+          const closingStockNum =
+            closingStockRaw === null ? null : Number(closingStockRaw);
+          const closingStock = Number.isNaN(closingStockNum)
+            ? null
+            : closingStockNum;
+
+          const reservedRaw =
+            rec["Reserved"] ?? rec["reserved"] ?? rec["Reserved_Stock"] ?? null;
+          const reservedNum = reservedRaw === null ? null : Number(reservedRaw);
+          const reserved = Number.isNaN(reservedNum) ? null : reservedNum;
+
+          const availableRaw =
+            rec["Available"] ?? rec["available"] ?? rec["Avail"] ?? null;
+          const availableNum =
+            availableRaw === null || availableRaw === undefined
+              ? null
+              : Number(availableRaw);
+          let available = Number.isNaN(availableNum) ? null : availableNum;
+          if (available === null) {
+            if (typeof closingStock === "number") {
+              const rsv = typeof reserved === "number" ? reserved : 0;
+              available = Math.max(0, closingStock - rsv);
+            } else {
+              available = null;
+            }
+          }
+
+          const productionQtyRaw =
+            rec["ProductionQty"] ??
+            rec["productionQty"] ??
+            rec["Production_Qty"] ??
+            rec["Quantity"] ??
+            null;
+          const productionQtyNum =
+            productionQtyRaw === null ? null : Number(productionQtyRaw);
+          const productionQty = Number.isNaN(productionQtyNum)
+            ? null
+            : productionQtyNum;
+
           return {
             raw: rec,
             id,
@@ -240,8 +322,11 @@ export default function ItemsPage(): JSX.Element {
             image,
             concept,
             fabric,
-            closingStock: Number.isNaN(closingStockNum) ? null : closingStockNum,
-            in_production: false,
+            closingStock: closingStock,
+            reserved: reserved,
+            available,
+            in_production: Boolean(productionQty && productionQty > 0),
+            productionQty: productionQty,
           };
         });
 
@@ -250,7 +335,7 @@ export default function ItemsPage(): JSX.Element {
           setItemsLoaded(true);
         }
       } catch (err) {
-        console.error('Error fetching items:', err);
+        console.error("Error fetching items:", err);
         if (!canceled) setItems([]);
       } finally {
         if (!canceled) setIsLoading(false);
@@ -262,49 +347,63 @@ export default function ItemsPage(): JSX.Element {
     };
   }, []);
 
-  // fetch designs in production once items are loaded, then mark items
+  // fetch designs_in_production once items are loaded to populate productionQty if available
   useEffect(() => {
     if (!itemsLoaded) return;
     let canceled = false;
-
     async function fetchDesignsInProd(): Promise<void> {
       try {
-        const res = await fetch('/api/designs_in_production');
+        const res = await fetch("/api/designs_in_production");
         const text = await res.text();
         if (!res.ok) {
-          console.warn('designs_in_production fetch failed', res.status, text);
+          console.warn("designs_in_production fetch failed", res.status, text);
           return;
         }
-
         let payload: ApiPayload;
         try {
           payload = JSON.parse(text) as ApiPayload;
         } catch {
           payload = text as ApiPayload;
         }
-
         const rows: unknown[] = getRowsFromPayload(payload);
 
-        const codes = rows
-          .map((r: unknown) => {
-            if (!r) return '';
-            if (typeof r === 'string') return r;
-            const rec = r as ApiRow;
-            return String(rec['product_code'] ?? rec['design_name'] ?? rec['Design_Name'] ?? rec['Product_Code'] ?? rec['design'] ?? '').trim();
-          })
-          .map((s) => String(s || '').trim().toLowerCase())
-          .filter(Boolean);
-
-        const codeSet = new Set<string>(codes);
+        const qtyMap = new Map<string, number>();
+        for (const r of rows) {
+          if (!r) continue;
+          const rec = typeof r === "object" ? (r as ApiRow) : {};
+          const rawCode =
+            rec["Product_Code"] ??
+            rec["product_code"] ??
+            rec["Design_no"] ??
+            rec["design_name"] ??
+            "";
+          const code = String(rawCode ?? "").trim();
+          if (!code) continue;
+          const qtyRaw = rec["Quantity"] ?? rec["quantity"] ?? 0;
+          const qty =
+            Number(qtyRaw === null || qtyRaw === undefined ? 0 : qtyRaw) || 0;
+          const key = code.toLowerCase();
+          qtyMap.set(key, (qtyMap.get(key) || 0) + qty);
+        }
 
         if (canceled) return;
-
-        setItems((prev) => prev.map((it) => ({ ...it, in_production: codeSet.has(String(it.id || it.name || '').trim().toLowerCase()) })));
+        setItems((prev) =>
+          prev.map((it) => {
+            const key = String(it.id || it.name || "")
+              .trim()
+              .toLowerCase();
+            const productionQty = qtyMap.get(key) ?? 0;
+            return {
+              ...it,
+              productionQty: productionQty || (it.productionQty ?? null),
+              in_production: (productionQty || (it.productionQty ?? 0)) > 0,
+            };
+          })
+        );
       } catch (err) {
-        console.error('Error fetching designs_in_production:', err);
+        console.error("Error fetching designs_in_production:", err);
       }
     }
-
     fetchDesignsInProd();
     return () => {
       canceled = true;
@@ -312,51 +411,80 @@ export default function ItemsPage(): JSX.Element {
   }, [itemsLoaded]);
 
   // options for selects
-  const conceptOptions = useMemo(() => toOptions(items.map((i) => i.concept ?? '').filter(Boolean)), [items]);
-  const fabricOptions = useMemo(() => toOptions(items.map((i) => i.fabric ?? '').filter(Boolean)), [items]);
-  const colorOptions = useMemo(() => toOptions(items.flatMap((i) => i.colors || [])), [items]);
+  const conceptOptions = useMemo(
+    () => toOptions(items.map((i) => i.concept ?? "").filter(Boolean)),
+    [items]
+  );
+  const fabricOptions = useMemo(
+    () => toOptions(items.map((i) => i.fabric ?? "").filter(Boolean)),
+    [items]
+  );
+  const colorOptions = useMemo(
+    () => toOptions(items.flatMap((i) => i.colors || [])),
+    [items]
+  );
 
   // reset page when filters/search change
   useEffect(() => {
     setCurrentPage(1);
     visibleRef.current = {};
-    // disconnect existing observers
     observersRef.current.forEach((o) => {
       try {
         o.disconnect();
-      } catch {
-        // ignore
-      }
+      } catch {}
     });
     observersRef.current.clear();
     forceRerender((n) => n + 1);
-  }, [debouncedSearch, selectedConcepts, selectedFabrics, selectedColors, stockFilter, pageSize]);
+  }, [
+    debouncedSearch,
+    selectedConcepts,
+    selectedFabrics,
+    selectedColors,
+    stockFilter,
+    pageSize,
+  ]);
 
-  // filtering logic
+  // filtering logic uses computed available (but stockFilter still uses available or closingStock fallback)
   const filteredItems = useMemo(() => {
-    const s = String(debouncedSearch || '').trim().toLowerCase();
-    const selectedConceptVals = selectedConcepts.map((x) => String(x.value ?? x).toLowerCase());
-    const selectedFabricVals = selectedFabrics.map((x) => String(x.value ?? x).toLowerCase());
-    const selectedColorVals = selectedColors.map((x) => String(x.value ?? x).toLowerCase());
+    const s = String(debouncedSearch || "")
+      .trim()
+      .toLowerCase();
+    const selectedConceptVals = selectedConcepts.map((x) =>
+      String(x.value ?? x).toLowerCase()
+    );
+    const selectedFabricVals = selectedFabrics.map((x) =>
+      String(x.value ?? x).toLowerCase()
+    );
+    const selectedColorVals = selectedColors.map((x) =>
+      String(x.value ?? x).toLowerCase()
+    );
 
     return items.filter((it) => {
-      if (stockFilter !== 'all') {
-        const cls = classifyStock(it.closingStock);
+      if (stockFilter !== "all") {
+        // primary stock value for filtering uses available OR closingStock + productionQty
+        const stockVal =
+          typeof it.available === "number"
+            ? it.available
+            : (typeof it.closingStock === "number" ? it.closingStock : 0) +
+              (typeof it.productionQty === "number" ? it.productionQty : 0);
+        const cls = classifyStock(stockVal);
         if (cls !== stockFilter) return false;
       }
 
       if (selectedConceptVals.length > 0) {
-        const v = String(it.concept ?? '').toLowerCase();
+        const v = String(it.concept ?? "").toLowerCase();
         if (!selectedConceptVals.includes(v)) return false;
       }
 
       if (selectedFabricVals.length > 0) {
-        const v = String(it.fabric ?? '').toLowerCase();
+        const v = String(it.fabric ?? "").toLowerCase();
         if (!selectedFabricVals.includes(v)) return false;
       }
 
       if (selectedColorVals.length > 0) {
-        const itemColors = (it.colors || []).map((c) => String(c || '').toLowerCase());
+        const itemColors = (it.colors || []).map((c) =>
+          String(c || "").toLowerCase()
+        );
         const has = selectedColorVals.some((c) => itemColors.includes(c));
         if (!has) return false;
       }
@@ -365,19 +493,26 @@ export default function ItemsPage(): JSX.Element {
         const hay = [
           it.name,
           it.id,
-          it.concept ?? '',
-          it.fabric ?? '',
+          it.concept ?? "",
+          it.fabric ?? "",
           ...(it.colors || []),
         ]
           .filter(Boolean)
-          .join(' ')
+          .join(" ")
           .toLowerCase();
         if (!hay.includes(s)) return false;
       }
 
       return true;
     });
-  }, [items, debouncedSearch, selectedConcepts, selectedFabrics, selectedColors, stockFilter]);
+  }, [
+    items,
+    debouncedSearch,
+    selectedConcepts,
+    selectedFabrics,
+    selectedColors,
+    stockFilter,
+  ]);
 
   // pagination calculations
   const totalItems = filteredItems.length;
@@ -389,26 +524,11 @@ export default function ItemsPage(): JSX.Element {
     return filteredItems.slice(start, start + pageSize);
   }, [filteredItems, safeCurrentPage, pageSize]);
 
-  // ensures currentPage valid when totalPages changes
   useEffect(() => {
     setCurrentPage((prev) => Math.min(prev, totalPages));
   }, [totalPages]);
 
-  // cleanup add-to-cart timers on unmount
-  useEffect(() => {
-    return () => {
-      Object.values(addTimersRef.current).forEach((id) => {
-        try {
-          clearTimeout(id);
-        } catch {
-          // ignore
-        }
-      });
-      addTimersRef.current = {};
-    };
-  }, []);
-
-  // lazy observe element
+  // intersection observer helper
   function observeElement(id: string, el: HTMLElement | null): void {
     if (!el) return;
     if (visibleRef.current[id]) return;
@@ -416,11 +536,8 @@ export default function ItemsPage(): JSX.Element {
     if (existing) {
       try {
         existing.disconnect();
-      } catch {
-        // ignore
-      }
+      } catch {}
     }
-
     const obs = new IntersectionObserver(
       (entries) => {
         for (const entry of entries) {
@@ -430,79 +547,113 @@ export default function ItemsPage(): JSX.Element {
             if (o) {
               try {
                 o.disconnect();
-              } catch {
-                // ignore
-              }
+              } catch {}
               observersRef.current.delete(id);
             }
             forceRerender((s) => s + 1);
           }
         }
       },
-      { root: null, rootMargin: '200px', threshold: 0.05 }
+      { root: null, rootMargin: "200px", threshold: 0.05 }
     );
     try {
       obs.observe(el);
       observersRef.current.set(id, obs);
     } catch {
-      // IntersectionObserver.observe may throw in some environments; ignore
+      // ignore
     }
   }
 
-  const handleAddToCart = (item: ItemRow): void => {
+  // per-card set handlers and color toggle
+  const incSet = (id: string, max: number | null) =>
+    setSetsMap((m) => {
+      const cur = Math.max(0, Number(m[id] ?? 1));
+      if (typeof max === "number" && !Number.isNaN(max) && cur + 1 > max)
+        return m;
+      return { ...m, [id]: cur + 1 };
+    });
+
+  const decSet = (id: string) =>
+    setSetsMap((m) => {
+      const cur = Math.max(0, Number(m[id] ?? 1));
+      return { ...m, [id]: Math.max(0, cur - 1) };
+    });
+
+  const setSet = (id: string, v: number, max: number | null) =>
+    setSetsMap((m) => {
+      let n = Math.max(0, Math.floor(Number(v) || 0));
+      if (typeof max === "number" && !Number.isNaN(max)) n = Math.min(n, max);
+      return { ...m, [id]: n };
+    });
+
+  const toggleCardColor = (id: string, color: string) => {
+    setCardSelectedColors((prev) => {
+      const existing = Array.isArray(prev[id]) ? [...prev[id]] : [];
+      const idx = existing.findIndex(
+        (c) => String(c).toLowerCase() === String(color).toLowerCase()
+      );
+      if (idx >= 0) existing.splice(idx, 1);
+      else existing.push(color);
+      return { ...prev, [id]: existing };
+    });
+  };
+
+  const handleAddToCart = (item: ItemRow) => {
+    // compute displayAvailable = closingStock + productionQty (visual only)
+    const closing =
+      typeof item.closingStock === "number" ? item.closingStock : 0;
+    const prod =
+      typeof item.productionQty === "number" ? item.productionQty : 0;
+    const displayAvailable = Math.max(0, closing + prod);
+
+    let setCount = Math.max(0, Math.floor(Number(setsMap[item.id] ?? 1)));
+    // if user selected colors, we treat `setCount` as the per-color sets (consistent with cart)
+    // clamp: total pieces = setCount * selectedColors.length <= displayAvailable
+    const sel = Array.isArray(cardSelectedColors[item.id])
+      ? cardSelectedColors[item.id]
+      : [];
+    const colorsCount = Math.max(1, sel.length || 1); // if none selected, treat as single group
+    if (displayAvailable > 0 && setCount * colorsCount > displayAvailable) {
+      // clamp sets so sets * colorsCount <= displayAvailable
+      setCount = Math.floor(displayAvailable / colorsCount);
+      if (setCount < 0) setCount = 0;
+    }
+
+    if (displayAvailable === 0) {
+      alert("No available stock for this design.");
+      return;
+    }
+
     addToCart({
       id: item.id,
       name: item.name,
-      image: item.image || '/placeholder.svg',
+      image: item.image || "/placeholder.svg",
       colors: item.colors,
       raw: item.raw,
+      set: setCount,
+      selectedColors: sel,
+      productionQty: item.productionQty ?? null,
+      closingStock: item.closingStock ?? null,
     });
 
     setAddedMap((m) => ({ ...m, [item.id]: true }));
-
-    // clear existing timer for this item (if any)
-    if (addTimersRef.current[item.id]) {
+    if (addTimersRef.current[item.id])
       clearTimeout(addTimersRef.current[item.id]);
-    }
-
-    // window.setTimeout returns number in browsers
     const timerId = window.setTimeout(() => {
       setAddedMap((m) => ({ ...m, [item.id]: false }));
       delete addTimersRef.current[item.id];
     }, 2500);
-
     addTimersRef.current[item.id] = timerId;
   };
 
-  // pagination UI helper: show a compact list with ellipses like [1,2,3,...,20]
-  function getPageButtons(current: number, total: number): (number | '...')[] {
-    const out: (number | '...')[] = [];
-    if (total <= 7) {
-      for (let i = 1; i <= total; i++) out.push(i);
-      return out;
-    }
-    out.push(1);
-    if (current > 4) out.push('...');
-    const start = Math.max(2, current - 1);
-    const end = Math.min(total - 1, current + 1);
-    for (let i = start; i <= end; i++) out.push(i);
-    if (current < total - 3) out.push('...');
-    out.push(total);
-    return out;
-  }
-
-  // typed handlers for react-select
-  const onConceptChange = (v: OnChangeValue<Option, true>) => setSelectedConcepts((v ?? []) as Option[]);
-  const onFabricChange = (v: OnChangeValue<Option, true>) => setSelectedFabrics((v ?? []) as Option[]);
-  const onColorChange = (v: OnChangeValue<Option, true>) => setSelectedColors((v ?? []) as Option[]);
-
+  // render
   return (
     <div className="container mx-auto px-4 py-8">
       <div className="mb-6 grid grid-cols-1 lg:grid-cols-2 gap-4 items-center">
         <div>
           <input
             value={searchText}
-            onChange={(e: React.ChangeEvent<HTMLInputElement>) => setSearchText(e.target.value)}
+            onChange={(e) => setSearchText(e.target.value)}
             placeholder="Search by design, code, color, concept or fabric..."
             className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-3 px-4 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500"
             aria-label="Search items"
@@ -510,16 +661,28 @@ export default function ItemsPage(): JSX.Element {
         </div>
 
         <div className="flex gap-3 items-center justify-end">
-          <div className="flex items-center gap-2 text-sm text-gray-300 mr-2">Stock</div>
-          {(['all', 'low', 'medium', 'high'] as const).map((s) => {
+          <div className="flex items-center gap-2 text-sm text-gray-300 mr-2">
+            Stock
+          </div>
+          {(["all", "low", "medium", "high"] as const).map((s) => {
             const active = stockFilter === s;
-            const label = s === 'all' ? 'All' : s === 'low' ? 'Low' : s === 'medium' ? 'Medium' : 'In stock';
+            const label =
+              s === "all"
+                ? "All"
+                : s === "low"
+                ? "Low"
+                : s === "medium"
+                ? "Medium"
+                : "In stock";
             return (
               <button
                 key={s}
                 onClick={() => setStockFilter(s)}
-                className={`px-3 py-2 rounded-md text-sm font-medium focus:outline-none ${active ? 'bg-gray-200 text-gray-900 shadow' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'
-                  }`}
+                className={`px-3 py-2 rounded-md text-sm font-medium focus:outline-none ${
+                  active
+                    ? "bg-gray-200 text-gray-900 shadow"
+                    : "bg-gray-800 text-gray-300 hover:bg-gray-700"
+                }`}
                 type="button"
                 aria-pressed={active}
               >
@@ -535,7 +698,7 @@ export default function ItemsPage(): JSX.Element {
           isMulti
           options={conceptOptions}
           value={selectedConcepts}
-          onChange={onConceptChange}
+          onChange={(v) => setSelectedConcepts((v ?? []) as Option[])}
           placeholder="Filter by concept..."
           styles={selectStyles}
           classNamePrefix="rs"
@@ -544,7 +707,7 @@ export default function ItemsPage(): JSX.Element {
           isMulti
           options={fabricOptions}
           value={selectedFabrics}
-          onChange={onFabricChange}
+          onChange={(v) => setSelectedFabrics((v ?? []) as Option[])}
           placeholder="Filter by fabric..."
           styles={selectStyles}
           classNamePrefix="rs"
@@ -553,7 +716,7 @@ export default function ItemsPage(): JSX.Element {
           isMulti
           options={colorOptions}
           value={selectedColors}
-          onChange={onColorChange}
+          onChange={(v) => setSelectedColors((v ?? []) as Option[])}
           placeholder="Filter by colour..."
           styles={selectStyles}
           classNamePrefix="rs"
@@ -568,11 +731,24 @@ export default function ItemsPage(): JSX.Element {
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 gap-6">
           {paginatedItems.map((item, index) => {
             const wasAdded = Boolean(addedMap[item.id]);
-            const meta = stockMeta(item.closingStock);
+            const closing =
+              typeof item.closingStock === "number" ? item.closingStock : 0;
+            const prod =
+              typeof item.productionQty === "number" ? item.productionQty : 0;
+            const displayAvailable = Math.max(0, closing + prod);
+            const stockNumber = displayAvailable;
+            const meta = stockMeta(stockNumber);
             const visible = !!visibleRef.current[item.id];
 
+            // per-card UI values
+            const thisSet = setsMap[item.id] ?? 1;
+            const selectedColorsForCard = cardSelectedColors[item.id] ?? [];
+
             return (
-              <article key={item.id || `${item.name}-${index}`} className="bg-gray-800 rounded-lg shadow-lg overflow-hidden flex flex-col h-full">
+              <article
+                key={item.id || `${item.name}-${index}`}
+                className="bg-gray-800 rounded-lg shadow-lg overflow-hidden flex flex-col h-full"
+              >
                 <div className="relative h-64 bg-gray-700 flex items-center justify-center overflow-hidden">
                   <div
                     ref={(el) => {
@@ -586,14 +762,22 @@ export default function ItemsPage(): JSX.Element {
                         src={item.image}
                         alt={item.name}
                         fill
-                        style={{ objectFit: 'cover' }}
-                        onError={() => setBrokenImages((b) => ({ ...b, [item.id]: true }))}
+                        style={{ objectFit: "cover" }}
+                        onError={() =>
+                          setBrokenImages((b) => ({ ...b, [item.id]: true }))
+                        }
                         quality={72}
                         sizes="(max-width: 640px) 100vw, (max-width: 1024px) 50vw, 33vw"
                       />
                     ) : (
                       <div className="w-full h-full bg-gray-800/60 flex items-center justify-center">
-                        <svg className="w-14 h-14 text-gray-600" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                        <svg
+                          className="w-14 h-14 text-gray-600"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                        >
                           <rect x="3" y="4" width="18" height="14" rx="2" />
                           <path d="M3 20h18" />
                           <circle cx="8.5" cy="10.5" r="1.5" />
@@ -604,40 +788,145 @@ export default function ItemsPage(): JSX.Element {
                 </div>
 
                 <div className="p-5 flex-1 flex flex-col">
-                  <h3 className="text-lg font-semibold text-white mb-2 truncate">{item.name}</h3>
+                  <h3 className="text-lg font-semibold text-white mb-2 truncate">
+                    {item.name}
+                  </h3>
 
                   {item.concept && (
                     <p className="text-sm text-gray-400 mb-1">
-                      <span className="text-gray-300 font-medium">Concept:</span> {item.concept}
+                      <span className="text-gray-300 font-medium">
+                        Concept:
+                      </span>{" "}
+                      {item.concept}
                     </p>
                   )}
                   {item.fabric && (
                     <p className="text-sm text-gray-400 mb-2">
-                      <span className="text-gray-300 font-medium">Fabric:</span> {item.fabric}
+                      <span className="text-gray-300 font-medium">Fabric:</span>{" "}
+                      {item.fabric}
                     </p>
                   )}
 
                   <p className="text-sm text-gray-300 mb-2">
-                    <span className="font-medium text-gray-200">Colors:</span>{' '}
-                    {item.colors.length ? item.colors.join(', ') : '—'}
+                    <span className="font-medium text-gray-200">Colors:</span>{" "}
+                    {item.colors.length ? item.colors.join(", ") : "—"}
                   </p>
 
-                  {/* small badges placed under details */}
                   <div className="flex items-center gap-2 mb-3">
-                    {/* stock badge */}
                     <span
                       className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${meta.colorClass}`}
-                      title={`${meta.label} • ${item.closingStock ?? '-'}`}
+                      title={`${meta.label} • ${stockNumber ?? "-"}`}
                     >
                       <Tag className="h-3 w-3" />
-                      <span className="leading-none">{meta.shortLabel}{typeof item.closingStock === 'number' ? ` • ${item.closingStock}` : ''}</span>
+                      <span className="leading-none">
+                        {meta.shortLabel}
+                        {typeof stockNumber === "number"
+                          ? ` • ${stockNumber}`
+                          : ""}
+                      </span>
                     </span>
 
-                    {/* in production badge (blue) */}
                     {item.in_production && (
-                      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-600 text-white">
+                      <span
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-600 text-white"
+                        title={`In production • ${item.productionQty ?? "-"}`}
+                      >
                         <Zap className="h-3 w-3" />
-                        <span className="leading-none">In production</span>
+                        <span className="leading-none">{`In production${
+                          typeof item.productionQty === "number"
+                            ? ` • ${item.productionQty}`
+                            : ""
+                        }`}</span>
+                      </span>
+                    )}
+                  </div>
+
+                  {/* color pills for selection */}
+                  <div className="mb-3">
+                    <div className="flex flex-wrap gap-2">
+                      {item.colors.length === 0 ? (
+                        <span className="text-sm text-gray-400">No colors</span>
+                      ) : (
+                        item.colors.map((c) => {
+                          const isActive = (
+                            cardSelectedColors[item.id] || []
+                          ).some(
+                            (sc) =>
+                              String(sc).toLowerCase() ===
+                              String(c).toLowerCase()
+                          );
+                          return (
+                            <button
+                              key={c}
+                              onClick={() => toggleCardColor(item.id, c)}
+                              type="button"
+                              className={`px-3 py-1 rounded-full text-sm font-medium transition ${
+                                isActive
+                                  ? "bg-blue-600 text-white shadow"
+                                  : "bg-[#0f1724] text-slate-200 border border-[#1f2937] hover:bg-[#13242f]"
+                              }`}
+                            >
+                              {c}
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+
+                  {/* per-card set selector */}
+                  <div className="mb-3 flex items-center gap-3">
+                    <div className="inline-flex items-center gap-2 bg-[#051116] border border-[#12303a] rounded-lg px-2 py-1">
+                      <button
+                        onClick={() => decSet(item.id)}
+                        className="h-8 w-8 rounded-md flex items-center justify-center text-slate-200 hover:bg-[#0b2b33]"
+                        aria-label="decrease sets"
+                        type="button"
+                      >
+                        −
+                      </button>
+
+                      <input
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        value={String(thisSet)}
+                        onChange={(e) =>
+                          setSet(
+                            item.id,
+                            Number(e.target.value || 0),
+                            displayAvailable
+                          )
+                        }
+                        className="w-12 text-center bg-transparent text-white font-medium outline-none"
+                        aria-label="Sets to order"
+                      />
+
+                      <button
+                        onClick={() => incSet(item.id, displayAvailable)}
+                        className={`h-8 w-8 rounded-md flex items-center justify-center text-white ${
+                          thisSet >= (displayAvailable ?? Infinity)
+                            ? "bg-gray-700 cursor-not-allowed"
+                            : "bg-blue-600 hover:bg-blue-700"
+                        }`}
+                        aria-label="increase sets"
+                        type="button"
+                        disabled={
+                          typeof displayAvailable === "number" &&
+                          thisSet >= displayAvailable
+                        }
+                      >
+                        +
+                      </button>
+                    </div>
+                    <div className="text-sm text-gray-400">Sets to order</div>
+                  </div>
+
+                  <div className="text-xs text-gray-300 mb-3">
+                    <strong>Available Qty:</strong> {displayAvailable}
+                    {(cardSelectedColors[item.id] || []).length > 0 && (
+                      <span className="ml-3 text-sm text-gray-400">
+                        Selected colours:{" "}
+                        {(cardSelectedColors[item.id] || []).length}
                       </span>
                     )}
                   </div>
@@ -645,20 +934,44 @@ export default function ItemsPage(): JSX.Element {
                   <div className="mt-auto">
                     <button
                       onClick={() => handleAddToCart(item)}
-                      className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded font-semibold text-white transition-colors ${wasAdded ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700'
-                        }`}
+                      className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded font-semibold text-white transition-colors ${
+                        wasAdded
+                          ? "bg-green-600 hover:bg-green-700"
+                          : "bg-blue-600 hover:bg-blue-700"
+                      }`}
                       aria-pressed={wasAdded}
+                      disabled={
+                        displayAvailable === 0 || (setsMap[item.id] ?? 1) === 0
+                      }
                     >
                       {wasAdded ? (
                         <>
-                          <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <svg
+                            className="h-5 w-5"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden
+                          >
                             <path d="M20 6L9 17l-5-5" />
                           </svg>
                           <span>Added</span>
                         </>
                       ) : (
                         <>
-                          <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                          <svg
+                            className="h-5 w-5"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                            aria-hidden
+                          >
                             <path d="M6 6h15l-1.5 9h-13z" />
                             <path d="M6 6L4 2" />
                             <circle cx="10" cy="20" r="1" />
@@ -676,40 +989,52 @@ export default function ItemsPage(): JSX.Element {
         </div>
       )}
 
-      {/* bottom pagination (mirror of top) */}
       <div className="mt-6 flex items-center justify-between">
         <div />
-        <nav className="inline-flex items-center gap-2" aria-label="Pagination bottom">
+        <nav
+          className="inline-flex items-center gap-2"
+          aria-label="Pagination bottom"
+        >
           <button
             onClick={() => setCurrentPage((p) => Math.max(1, p - 1))}
             disabled={safeCurrentPage === 1}
-            className={`px-3 py-2 rounded-md border ${safeCurrentPage === 1 ? 'text-gray-500 border-gray-700' : 'text-gray-200 border-gray-600 hover:bg-gray-700'}`}
+            className={`px-3 py-2 rounded-md border ${
+              safeCurrentPage === 1
+                ? "text-gray-500 border-gray-700"
+                : "text-gray-200 border-gray-600 hover:bg-gray-700"
+            }`}
             aria-label="Previous page"
             type="button"
           >
             ← Previous
           </button>
 
-          {getPageButtons(safeCurrentPage, totalPages).map((p, i) =>
-            p === '...' ? (
-              <span key={`dots-b-${i}`} className="px-2 text-gray-400">…</span>
-            ) : (
+          {Array.from(Array(totalPages).keys()).map((i) => {
+            const p = i + 1;
+            return (
               <button
-                key={`b-${p}`}
-                onClick={() => setCurrentPage(Number(p))}
-                aria-current={safeCurrentPage === p ? 'page' : undefined}
-                className={`px-3 py-2 rounded-md border ${safeCurrentPage === p ? 'bg-white text-gray-900 border-gray-300' : 'text-gray-200 border-gray-600 hover:bg-gray-700'}`}
+                key={p}
+                onClick={() => setCurrentPage(p)}
+                className={`px-3 py-2 rounded-md border ${
+                  safeCurrentPage === p
+                    ? "bg-white text-gray-900 border-gray-300"
+                    : "text-gray-200 border-gray-600 hover:bg-gray-700"
+                }`}
                 type="button"
               >
                 {p}
               </button>
-            )
-          )}
+            );
+          })}
 
           <button
             onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))}
             disabled={safeCurrentPage === totalPages}
-            className={`px-3 py-2 rounded-md border ${safeCurrentPage === totalPages ? 'text-gray-500 border-gray-700' : 'text-gray-200 border-gray-600 hover:bg-gray-700'}`}
+            className={`px-3 py-2 rounded-md border ${
+              safeCurrentPage === totalPages
+                ? "text-gray-500 border-gray-700"
+                : "text-gray-200 border-gray-600 hover:bg-gray-700"
+            }`}
             aria-label="Next page"
             type="button"
           >
