@@ -1,12 +1,20 @@
+// app/(pages)/cart/page.tsx
 "use client";
 
-import React, { JSX, useState } from "react";
+import React, { useMemo, useState } from "react";
 import Image from "next/image";
 import { Trash2, Plus, Minus } from "lucide-react";
 import { useCart, CartItem } from "@/context/CartContext";
 import { useRouter } from "next/navigation";
 import { useUser } from "@clerk/nextjs";
-import { ShareOrderButton, OrderShape } from "@/components/ShareOrder";
+import {
+  ShareOrderButton,
+  OrderShape as ShareOrderShape,
+} from "@/components/ShareOrder";
+
+/* ---------------------------
+   Types
+   --------------------------- */
 
 type UpdatePayload = Partial<{
   set: number;
@@ -23,6 +31,10 @@ type CartContextType = {
   clearCart?: () => void;
 };
 
+/* ---------------------------
+   Small safe helpers
+   --------------------------- */
+
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
@@ -33,98 +45,87 @@ function safeNumber(v: unknown): number {
   return Number.isNaN(n) ? 0 : n;
 }
 
-function googleDriveImage(u?: string | null): boolean {
+/** type guard for drive-like image values */
+function googleDriveImage(u: unknown): u is string {
   return typeof u === "string" && u.length > 0;
 }
-function getGoogleDriveImageSrc(googleDriveUrl?: string | null): string {
-  if (!googleDriveImage(googleDriveUrl)) return "/placeholder.svg";
-  const m = (googleDriveUrl ?? "").match(/\/d\/([^\/]+)/);
+
+function getGoogleDriveImageSrc(googleDriveUrl: string): string {
+  const m = googleDriveUrl.match(/\/d\/([^\/]+)/);
   if (m?.[1]) return `https://drive.google.com/thumbnail?id=${m[1]}`;
-  return String(googleDriveUrl);
+  // also check for id= query param
+  const q = googleDriveUrl.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);
+  if (q?.[1]) return `https://drive.google.com/thumbnail?id=${q[1]}`;
+  return googleDriveUrl;
 }
 
-/** Safe helpers to extract typed fields from unknown/raw structures */
-function getNumberField(obj: unknown, key: string): number {
-  if (!isObject(obj)) return 0;
-  const v = obj[key];
-  return safeNumber(v);
-}
 function getStringField(obj: unknown, key: string): string | undefined {
   if (!isObject(obj)) return undefined;
   const v = obj[key];
-  return typeof v === "string" && v.trim() ? v.trim() : undefined;
+  if (typeof v === "string" && v.trim()) return v.trim();
+  return undefined;
 }
 
-/** Safely extract available colors from different legacy shapes */
+function getNumberField(obj: unknown, key: string): number {
+  if (!isObject(obj)) return 0;
+  return safeNumber(obj[key]);
+}
+
+function getArrayField(obj: unknown, key: string): unknown[] | undefined {
+  if (!isObject(obj)) return undefined;
+  const v = obj[key];
+  return Array.isArray(v) ? v : undefined;
+}
+
+/* ---------------------------
+   Color / selected helpers
+   --------------------------- */
+
+/** Safely get available colours from a cart item */
 function getAvailableColors(item: CartItem): string[] {
-  if (
-    Array.isArray((item as unknown as Record<string, unknown>).colors) &&
-    ((item as unknown as Record<string, unknown>).colors as unknown[]).length >
-      0
-  ) {
-    return ((item as unknown as Record<string, unknown>).colors as unknown[])
-      .map((c) => String(c ?? "").trim())
-      .filter(Boolean);
+  const topArr = getArrayField(item as unknown, "colors");
+  if (topArr && topArr.length > 0) {
+    return topArr.map((c) => String(c ?? "").trim()).filter(Boolean);
   }
-  if (isObject(item.raw)) {
-    const raw = item.raw as Record<string, unknown>;
+  if (isObject((item as unknown as Record<string, unknown>).raw)) {
+    const raw = (item as unknown as Record<string, unknown>).raw as Record<
+      string,
+      unknown
+    >;
     const ac =
       raw["available_colors"] ??
       raw["availableColors"] ??
       raw["colors"] ??
       raw["Colors"];
-    if (Array.isArray(ac)) {
-      return (ac as unknown[])
-        .map((c) => String(c ?? "").trim())
-        .filter(Boolean);
-    }
+    if (Array.isArray(ac))
+      return ac.map((c) => String(c ?? "").trim()).filter(Boolean);
   }
   return [];
 }
 
-/** Safely return selected colors (supports legacy single selectedColor) */
+/** Safely get selected colors from cart item (legacy support) */
 function getSelectedColors(item: CartItem): string[] {
-  if (
-    Array.isArray((item as unknown as Record<string, unknown>).selectedColors)
-  ) {
-    return (
-      (item as unknown as Record<string, unknown>).selectedColors as unknown[]
-    ).map(String);
-  }
-  if (isObject(item.raw)) {
-    const val =
-      (item.raw as Record<string, unknown>)["selectedColor"] ??
-      (item.raw as Record<string, unknown>)["selected_colors"];
-    if (typeof val === "string" && val.trim()) return [val.trim()];
-    if (Array.isArray(val))
-      return (val as unknown[])
-        .map((c) => String(c ?? "").trim())
-        .filter(Boolean);
+  const topArr = getArrayField(item as unknown, "selectedColors");
+  if (topArr) return topArr.map((c) => String(c ?? "").trim()).filter(Boolean);
+
+  if (isObject((item as unknown as Record<string, unknown>).raw)) {
+    const raw = (item as unknown as Record<string, unknown>).raw as Record<
+      string,
+      unknown
+    >;
+    const v = raw["selectedColor"] ?? raw["selected_colors"];
+    if (typeof v === "string" && v.trim()) return [v.trim()];
+    if (Array.isArray(v))
+      return v.map((c) => String(c ?? "").trim()).filter(Boolean);
   }
   return [];
 }
 
-/** safe helper to derive a human-friendly label from item */
-function getItemLabel(item: CartItem): string {
-  if (item.name && String(item.name).trim()) return String(item.name).trim();
-  if (isObject(item.raw)) {
-    const raw = item.raw as Record<string, unknown>;
-    const candidates = [
-      raw["label"],
-      raw["skuLabel"],
-      raw["Item"],
-      raw["itemName"],
-      raw["name"],
-      raw["value"],
-    ];
-    for (const c of candidates) {
-      if (typeof c === "string" && c.trim()) return c.trim();
-    }
-  }
-  return "";
-}
+/* ---------------------------
+   Main component
+   --------------------------- */
 
-export default function CartPage(): JSX.Element {
+export default function CartPage(): React.ReactElement {
   const { cartItems, removeFromCart, updateItem, getTotalSets, clearCart } =
     useCart() as CartContextType;
   const { isLoaded, isSignedIn, user } = useUser();
@@ -136,26 +137,27 @@ export default function CartPage(): JSX.Element {
   const [placing, setPlacing] = useState<boolean>(false);
   const [showShareModal, setShowShareModal] = useState<boolean>(false);
   const [placedOrderForShare, setPlacedOrderForShare] =
-    useState<OrderShape | null>(null);
+    useState<ShareOrderShape | null>(null);
 
   const itemCount: number = Array.isArray(cartItems) ? cartItems.length : 0;
   const totalSets: number =
     typeof getTotalSets === "function"
       ? getTotalSets()
       : Array.isArray(cartItems)
-      ? cartItems.reduce(
-          (s: number, it: CartItem) =>
+      ? cartItems.reduce((s, it) => {
+          return (
             s +
             safeNumber(
               (it as unknown as Record<string, unknown>).set ??
                 (it as unknown as Record<string, unknown>).quantity ??
                 0
-            ),
-          0
-        )
+            )
+          );
+        }, 0)
       : 0;
 
-  // increase / decrease and update helpers (respect selectedColors)
+  /* ---- helpers that respect colors when counting pieces ---- */
+
   const inc = (it: CartItem): void => {
     const cur = safeNumber(
       (it as unknown as Record<string, unknown>).set ??
@@ -171,16 +173,14 @@ export default function CartPage(): JSX.Element {
         ? ((it as unknown as Record<string, unknown>)
             .selectedColors as string[])
         : getSelectedColors(it);
+
     const colorsCount = Math.max(1, selectedColors.length || 1);
-    // available (closingStock + productionQty) — read safely from item.raw or top-level
     const available =
       getNumberField(it, "closingStock") + getNumberField(it, "productionQty");
-    // compute total pieces after increment
     const totalAfter = (cur + 1) * colorsCount;
     if (available && totalAfter > available) {
-      // block and show a message
       alert(
-        `Only ${available} pieces available (requested ${totalAfter}). Reduce sets or colors.`
+        `Only ${available} pieces available (requested ${totalAfter}). Reduce sets or colours.`
       );
       return;
     }
@@ -207,13 +207,13 @@ export default function CartPage(): JSX.Element {
         ? ((it as unknown as Record<string, unknown>)
             .selectedColors as string[])
         : getSelectedColors(it);
+
     const colorsCount = Math.max(1, selectedColors.length || 1);
     const available =
       getNumberField(it, "closingStock") + getNumberField(it, "productionQty");
     const totalAfter = n * colorsCount;
     if (available && totalAfter > available) {
       alert(`Only ${available} pieces available (requested ${totalAfter}).`);
-      // clamp to floor(available / colorsCount)
       const maxSets = Math.floor(available / colorsCount);
       updateItem(it.id, { set: Math.max(0, maxSets) });
       return;
@@ -221,7 +221,6 @@ export default function CartPage(): JSX.Element {
     updateItem(it.id, { set: n });
   };
 
-  // toggle a color pill for an item
   const onColorToggle = (it: CartItem, color: string): void => {
     const prev = Array.isArray(
       (it as unknown as Record<string, unknown>).selectedColors
@@ -231,12 +230,13 @@ export default function CartPage(): JSX.Element {
             .selectedColors as string[]),
         ]
       : getSelectedColors(it);
+
     const idx = prev.findIndex(
       (c) => String(c).toLowerCase() === String(color).toLowerCase()
     );
     if (idx >= 0) prev.splice(idx, 1);
     else prev.push(color);
-    // after toggling, validate sets * colors <= available
+
     const sets = safeNumber(
       (it as unknown as Record<string, unknown>).set ??
         (it as unknown as Record<string, unknown>).quantity ??
@@ -246,7 +246,6 @@ export default function CartPage(): JSX.Element {
     const available =
       getNumberField(it, "closingStock") + getNumberField(it, "productionQty");
     if (available && sets * colorsCount > available) {
-      // clamp sets to available/colorsCount
       const maxSets = Math.floor(available / colorsCount);
       updateItem(it.id, { selectedColors: prev, set: Math.max(0, maxSets) });
     } else {
@@ -260,7 +259,6 @@ export default function CartPage(): JSX.Element {
     setApplying(true);
     try {
       for (const it of cartItems) {
-        // validate available for each
         const colorsCount = Math.max(
           1,
           Array.isArray(
@@ -306,12 +304,15 @@ export default function CartPage(): JSX.Element {
     }
   };
 
-  // build order & place (kept from your original placeOrder behavior)
+  /* ---------------------------
+     Build order & place
+     --------------------------- */
+
   function buildOrderShapeFromResponse(
     orderId: string | undefined,
     customerPayload: Record<string, unknown> | null,
     itemsPayload: Record<string, unknown>[]
-  ): OrderShape {
+  ): ShareOrderShape {
     const itemsForShare = (itemsPayload || []).map((r) => {
       const qty = safeNumber(
         (r as Record<string, unknown>)["qty"] ??
@@ -319,34 +320,36 @@ export default function CartPage(): JSX.Element {
           (r as Record<string, unknown>)["sets"] ??
           0
       );
-      const color = (r as Record<string, unknown>)["color"];
-      return {
-        itemName: String(
-          (r as Record<string, unknown>)["itemName"] ??
-            (r as Record<string, unknown>)["sku"] ??
-            (r as Record<string, unknown>)["label"] ??
-            ""
-        ),
-        color: typeof color === "string" ? color : "",
-        quantity: qty,
-      };
+      const colorRaw = (r as Record<string, unknown>)["color"];
+      const color = typeof colorRaw === "string" ? colorRaw : "";
+      const itemName = String(
+        (r as Record<string, unknown>)["itemName"] ??
+          (r as Record<string, unknown>)["sku"] ??
+          (r as Record<string, unknown>)["label"] ??
+          ""
+      );
+      return { itemName, color, quantity: qty };
     });
 
-    const order: OrderShape = {
+    // build customer object always as an object (ShareOrder expects no `null` customer)
+    const customer = {
+      name:
+        (customerPayload &&
+          String(customerPayload["label"] ?? customerPayload["name"] ?? "")) ??
+        "",
+      phone: (customerPayload && String(customerPayload["phone"] ?? "")) ?? "",
+      email: (customerPayload && String(customerPayload["email"] ?? "")) ?? "",
+    };
+
+    const order: ShareOrderShape = {
       id: orderId,
-      customer: {
-        name:
-          (customerPayload &&
-            String(customerPayload?.label ?? customerPayload?.name ?? "")) ??
-          "",
-        phone: (customerPayload && String(customerPayload?.phone ?? "")) ?? "",
-        email: (customerPayload && String(customerPayload?.email ?? "")) ?? "",
-      },
+      customer,
       agent: { name: "", number: "", email: "" },
       items: itemsForShare,
       createdAt: new Date().toISOString(),
       source: "web-cart",
-    };
+    } as ShareOrderShape;
+
     return order;
   }
 
@@ -364,23 +367,27 @@ export default function CartPage(): JSX.Element {
     setPlacing(true);
     try {
       const itemsPayload: Record<string, unknown>[] = [];
+
       for (const it of cartItems) {
         const qty = safeNumber(
           (it as unknown as Record<string, unknown>).set ??
             (it as unknown as Record<string, unknown>).quantity ??
             0
         );
-        const selectedColors: string[] = Array.isArray(
+        const selectedColors = Array.isArray(
           (it as unknown as Record<string, unknown>).selectedColors
         )
           ? ((it as unknown as Record<string, unknown>)
               .selectedColors as string[])
           : getSelectedColors(it);
-        const baseSku = it.id ?? undefined;
+
         const base: Record<string, unknown> = {
-          sku: baseSku,
-          raw: it.raw ?? null,
-          itemName: getItemLabel(it) || undefined,
+          sku: it.id ?? undefined,
+          raw: (it as unknown as Record<string, unknown>).raw ?? null,
+          itemName:
+            getStringField(it as unknown, "name") ??
+            getStringField(it as unknown, "Item") ??
+            undefined,
           qty,
         };
 
@@ -401,11 +408,13 @@ export default function CartPage(): JSX.Element {
         (user?.username as string | undefined) ??
         (emailAddr as string | undefined) ??
         "Customer";
+
       const customerPayload: Record<string, unknown> = {
         label: userName,
         email: (emailAddr as string) ?? null,
         phone: null,
       };
+
       const payload = {
         customer: customerPayload,
         agent: null,
@@ -421,6 +430,7 @@ export default function CartPage(): JSX.Element {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
+
       let json: unknown = null;
       try {
         json = await res.json();
@@ -446,6 +456,7 @@ export default function CartPage(): JSX.Element {
             (asRecord["order"] as Record<string, unknown>)["id"] ?? ""
           );
       }
+
       const shareOrder = buildOrderShapeFromResponse(
         createdId,
         customerPayload,
@@ -469,6 +480,10 @@ export default function CartPage(): JSX.Element {
     }
   };
 
+  /* ---------------------------
+     Render
+     --------------------------- */
+
   return (
     <div className="min-h-screen bg-[#06121a] text-white py-10">
       <div className="max-w-6xl mx-auto px-4">
@@ -481,6 +496,7 @@ export default function CartPage(): JSX.Element {
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-6">
+            {/* master controls */}
             <div className="rounded-xl border border-[#12202a] bg-[#07151a] p-4">
               <div className="flex flex-col md:flex-row md:items-center gap-4">
                 <div className="flex items-center gap-3">
@@ -548,6 +564,7 @@ export default function CartPage(): JSX.Element {
               </p>
             </div>
 
+            {/* items */}
             {cartItems.length === 0 ? (
               <div className="rounded-lg bg-[#0b1620] border border-[#12202a] p-8 text-center text-slate-400">
                 Your cart is empty.
@@ -569,11 +586,20 @@ export default function CartPage(): JSX.Element {
                 const available =
                   getNumberField(item, "closingStock") +
                   getNumberField(item, "productionQty");
-
                 const totalPieces = Math.max(
                   0,
                   qty * Math.max(1, selectedColors.length || 1)
                 );
+
+                const rawImage =
+                  getStringField(item as unknown, "image") ??
+                  getStringField(item as unknown, "image_url") ??
+                  null;
+                const imageSrc =
+                  rawImage && googleDriveImage(rawImage)
+                    ? getGoogleDriveImageSrc(rawImage)
+                    : "/placeholder.svg";
+
                 return (
                   <article
                     key={item.id}
@@ -592,24 +618,10 @@ export default function CartPage(): JSX.Element {
                     <div className="grid grid-cols-[88px_1fr_220px] gap-6 items-start p-6">
                       <div className="w-20 h-20 rounded-md overflow-hidden bg-[#0f1724] flex items-center justify-center">
                         <Image
-                          src={
-                            googleDriveImage(
-                              (item as unknown as Record<string, unknown>)
-                                .image ??
-                                (item as unknown as Record<string, unknown>)
-                                  .image_url ??
-                                null
-                            )
-                              ? getGoogleDriveImageSrc(
-                                  (item as unknown as Record<string, unknown>)
-                                    .image ??
-                                    (item as unknown as Record<string, unknown>)
-                                      .image_url ??
-                                    null
-                                )
-                              : "/placeholder.svg"
-                          }
-                          alt={String(item.name ?? "")}
+                          src={imageSrc}
+                          alt={String(
+                            getStringField(item as unknown, "name") ?? ""
+                          )}
                           width={160}
                           height={160}
                           className="object-cover w-full h-full"
@@ -618,31 +630,25 @@ export default function CartPage(): JSX.Element {
 
                       <div>
                         <h2 className="text-lg font-semibold text-white">
-                          {item.name}
+                          {getStringField(item as unknown, "name") ??
+                            item.id ??
+                            ""}
                         </h2>
 
                         <div className="mt-2 text-sm text-slate-300 flex flex-wrap gap-4">
-                          {(item as unknown as Record<string, unknown>)
-                            .concept && (
+                          {getStringField(item as unknown, "concept") && (
                             <span className="text-slate-300">
                               <span className="text-slate-400">Concept:</span>{" "}
                               <span className="font-medium text-white">
-                                {
-                                  (item as unknown as Record<string, unknown>)
-                                    .concept
-                                }
+                                {getStringField(item as unknown, "concept")}
                               </span>
                             </span>
                           )}
-                          {(item as unknown as Record<string, unknown>)
-                            .fabric && (
+                          {getStringField(item as unknown, "fabric") && (
                             <span className="text-slate-300">
                               <span className="text-slate-400">Fabric:</span>{" "}
                               <span className="font-medium text-white">
-                                {
-                                  (item as unknown as Record<string, unknown>)
-                                    .fabric
-                                }
+                                {getStringField(item as unknown, "fabric")}
                               </span>
                             </span>
                           )}
@@ -654,9 +660,9 @@ export default function CartPage(): JSX.Element {
                               No colors
                             </div>
                           ) : (
-                            colors.map((c: string) => {
+                            colors.map((c) => {
                               const isActive = selectedColors.some(
-                                (sc: string) =>
+                                (sc) =>
                                   String(sc).toLowerCase() ===
                                   String(c).toLowerCase()
                               );
@@ -694,11 +700,13 @@ export default function CartPage(): JSX.Element {
                             type="number"
                             min={0}
                             value={String(qty)}
-                            onChange={(
-                              e: React.ChangeEvent<HTMLInputElement>
-                            ) => onSetChange(item, Number(e.target.value))}
+                            onChange={(e) =>
+                              onSetChange(item, Number(e.target.value))
+                            }
                             className="w-16 text-center bg-transparent text-white font-medium outline-none"
-                            aria-label={`Quantity for ${item.name}`}
+                            aria-label={`Quantity for ${
+                              getStringField(item as unknown, "name") ?? item.id
+                            }`}
                           />
 
                           <button
@@ -742,7 +750,7 @@ export default function CartPage(): JSX.Element {
             )}
           </div>
 
-          {/* right: order summary */}
+          {/* right: summary */}
           <aside>
             <div className="bg-[#0b1620] border border-[#12202a] rounded-xl p-6 sticky top-8">
               <h3 className="text-lg font-semibold">Order Summary</h3>
@@ -777,6 +785,7 @@ export default function CartPage(): JSX.Element {
         </div>
       </div>
 
+      {/* share modal */}
       {showShareModal && placedOrderForShare && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center"
@@ -804,6 +813,7 @@ export default function CartPage(): JSX.Element {
                   </span>
                 </p>
               </div>
+
               <button
                 onClick={() => {
                   setShowShareModal(false);
@@ -820,23 +830,13 @@ export default function CartPage(): JSX.Element {
             <div className="mt-4 text-sm text-slate-300">
               <p>Share this order quickly via WhatsApp:</p>
             </div>
+
             <div className="mt-4 flex items-center gap-3">
               <ShareOrderButton
                 order={placedOrderForShare}
                 phone={placedOrderForShare.customer?.phone ?? ""}
                 className="!bg-green-600 !hover:bg-green-700"
               />
-              <button
-                onClick={() => {
-                  setShowShareModal(false);
-                  setPlacedOrderForShare(null);
-                  router.push("/orders");
-                }}
-                className="ml-auto bg-transparent border border-[#23303a] text-slate-300 px-3 py-2 rounded hover:bg-[#0f1724]"
-                type="button"
-              >
-                View Orders
-              </button>
             </div>
 
             <div className="mt-3 text-xs text-slate-400">

@@ -1,3 +1,4 @@
+// app/(pages)/orders/page.tsx
 "use client";
 
 import React, { JSX, useCallback, useEffect, useMemo, useState } from "react";
@@ -217,6 +218,55 @@ function normalizeOrderShape(raw: unknown): NormalizedOrder {
     pluckString(r, "orderStatus", "order_status", "status") ?? ""
   ).trim();
 
+  // SAFE coercions for fields that might be object|null/undefined
+  const cancelledByRaw = (r as Record<string, unknown>).cancelledBy;
+  const cancelledBy: string | null | undefined =
+    cancelledByRaw === undefined
+      ? undefined
+      : cancelledByRaw === null
+      ? null
+      : typeof cancelledByRaw === "string"
+      ? cancelledByRaw
+      : String(cancelledByRaw);
+
+  const cancelledAtRaw = (r as Record<string, unknown>).cancelledAt;
+  let cancelledAt: string | null | undefined = undefined;
+  if (cancelledAtRaw === undefined) cancelledAt = undefined;
+  else if (cancelledAtRaw === null) cancelledAt = null;
+  else if (isSecondsObject(cancelledAtRaw)) {
+    cancelledAt = new Date(cancelledAtRaw.seconds * 1000).toISOString();
+  } else {
+    cancelledAt = String(cancelledAtRaw);
+  }
+
+  const statusHistoryRaw = (r as Record<string, unknown>).statusHistory;
+  let statusHistory: NormalizedOrder["statusHistory"] | undefined = undefined;
+
+  if (Array.isArray(statusHistoryRaw)) {
+    statusHistory = (statusHistoryRaw as unknown[])
+      .map((s) => {
+        if (!isObject(s)) return null;
+        return {
+          status: safeString((s as Record<string, unknown>)["status"]) || "",
+          changedBy:
+            (s as Record<string, unknown>)["changedBy"] === undefined
+              ? undefined
+              : (s as Record<string, unknown>)["changedBy"] === null
+              ? null
+              : String((s as Record<string, unknown>)["changedBy"]),
+          changedAt: (s as Record<string, unknown>)["changedAt"] ?? undefined,
+          reason:
+            (s as Record<string, unknown>)["reason"] === undefined
+              ? undefined
+              : (s as Record<string, unknown>)["reason"] === null
+              ? null
+              : String((s as Record<string, unknown>)["reason"]),
+          meta: (s as Record<string, unknown>)["meta"] ?? null,
+        };
+      })
+      .filter(Boolean) as NormalizedOrder["statusHistory"];
+  }
+
   return {
     id,
     customerName,
@@ -228,9 +278,9 @@ function normalizeOrderShape(raw: unknown): NormalizedOrder {
     totalQty,
     raw: r,
     orderStatus: statusCandidate || undefined,
-    cancelledBy: (r as Record<string, unknown>).cancelledBy ?? null,
-    cancelledAt: (r as Record<string, unknown>).cancelledAt ?? null,
-    statusHistory: (r as Record<string, unknown>).statusHistory ?? undefined,
+    cancelledBy,
+    cancelledAt,
+    statusHistory,
   };
 }
 
@@ -281,22 +331,6 @@ export default function OrdersPage(): JSX.Element {
         rawList = (data as Record<string, unknown>).orders as unknown[];
       else rawList = [];
 
-      // const normalized = rawList.map((r) => {
-      //   if (r && typeof r === "object" && "payload" in r) {
-      //     const rec = r as Record<string, unknown>;
-      //     const payload = rec.payload;
-      //     if (payload && typeof payload === "object") {
-      //       const base = normalizeOrderShape(payload);
-      //       if (!base.id && rec.id) base.id = String(rec.id);
-      //       base.raw = rec;
-      //       return base;
-      //     }
-      //   }
-      //   const base2 = normalizeOrderShape(r);
-      //   base2.raw = r;
-      //   return base2;
-      // });
-
       const normalized = rawList.map((rRaw) => {
         const rec =
           rRaw && typeof rRaw === "object"
@@ -340,9 +374,19 @@ export default function OrdersPage(): JSX.Element {
               if (!isObject(s)) return null;
               return {
                 status: safeString((s as Record<string, unknown>)["status"]),
-                changedBy: (s as Record<string, unknown>)["changedBy"] ?? null,
+                changedBy:
+                  (s as Record<string, unknown>)["changedBy"] === undefined
+                    ? undefined
+                    : (s as Record<string, unknown>)["changedBy"] === null
+                    ? null
+                    : String((s as Record<string, unknown>)["changedBy"]),
                 changedAt: (s as Record<string, unknown>)["changedAt"] ?? null,
-                reason: (s as Record<string, unknown>)["reason"] ?? null,
+                reason:
+                  (s as Record<string, unknown>)["reason"] === undefined
+                    ? undefined
+                    : (s as Record<string, unknown>)["reason"] === null
+                    ? null
+                    : String((s as Record<string, unknown>)["reason"]),
                 meta: (s as Record<string, unknown>)["meta"] ?? null,
               };
             })
@@ -755,7 +799,7 @@ export default function OrdersPage(): JSX.Element {
     }
 
     // fallback: flat item list with quantity/qty/sets fields
-    return (items as unknown[]).reduce((acc, it) => {
+    return (items as unknown[]).reduce((acc: number, it) => {
       if (!it || typeof it !== "object") return acc;
       const rec = it as Record<string, unknown>;
       return (
@@ -792,7 +836,7 @@ export default function OrdersPage(): JSX.Element {
             'Search: use "customer: name", "agent: name", "id: <id>" or press Enter for quick customer search'
           }
           value={searchQuery}
-          onChange={handleSearchChange}
+          onChange={(e) => setSearchQuery(e.target.value)}
           onKeyDown={handleSearchKeyDown}
           className="appearance-none block w-full bg-gray-800 text-gray-300 border border-gray-700 rounded py-3 px-4 leading-tight focus:outline-none focus:bg-gray-700"
           aria-label="Search orders"
@@ -894,7 +938,6 @@ export default function OrdersPage(): JSX.Element {
                   cancelledAt: order.cancelledAt ?? undefined,
                   statusHistory: (order.statusHistory ??
                     []) as unknown as CardOrderShape["statusHistory"],
-                  // totalQty: order.totalQty ?? 0,
                   totalQty:
                     Number(
                       order.totalQty ?? computeTotalQtyFromItems(order.items)

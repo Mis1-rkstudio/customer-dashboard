@@ -1,5 +1,5 @@
 "use client";
-import React, { useMemo, useState } from "react";
+import React, { JSX, useMemo, useState } from "react";
 
 export type StatusHistoryItem = {
   status: string;
