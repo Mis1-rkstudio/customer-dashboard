@@ -1,7 +1,8 @@
+// app/items/page.tsx  (replace your file contents with this)
 "use client";
 
 import React, { JSX, useEffect, useMemo, useRef, useState } from "react";
-import Select, { StylesConfig, OnChangeValue } from "react-select";
+import Select, { StylesConfig } from "react-select";
 import { Tag, Zap } from "lucide-react";
 import { useCart } from "@/context/CartContext";
 import Image from "next/image";
@@ -608,11 +609,10 @@ export default function ItemsPage(): JSX.Element {
 
     let setCount = Math.max(0, Math.floor(Number(setsMap[item.id] ?? 1)));
     // if user selected colors, we treat `setCount` as the per-color sets (consistent with cart)
-    // clamp: total pieces = setCount * selectedColors.length <= displayAvailable
     const sel = Array.isArray(cardSelectedColors[item.id])
       ? cardSelectedColors[item.id]
       : [];
-    const colorsCount = Math.max(1, sel.length || 1); // if none selected, treat as single group
+    const colorsCount = Math.max(1, sel.length || 1);
     if (displayAvailable > 0 && setCount * colorsCount > displayAvailable) {
       // clamp sets so sets * colorsCount <= displayAvailable
       setCount = Math.floor(displayAvailable / colorsCount);
@@ -744,6 +744,17 @@ export default function ItemsPage(): JSX.Element {
             const thisSet = setsMap[item.id] ?? 1;
             const selectedColorsForCard = cardSelectedColors[item.id] ?? [];
 
+            // ----- NEW: compute colorsCount and max sets allowed based on pieces -----
+            const colorsCount = Math.max(
+              1,
+              (selectedColorsForCard || []).length || 1
+            );
+            const maxSetsForCard =
+              typeof displayAvailable === "number" && displayAvailable >= 0
+                ? Math.floor(displayAvailable / colorsCount)
+                : null; // null => no limit
+
+            // show tile
             return (
               <article
                 key={item.id || `${item.name}-${index}`}
@@ -894,7 +905,8 @@ export default function ItemsPage(): JSX.Element {
                           setSet(
                             item.id,
                             Number(e.target.value || 0),
-                            displayAvailable
+                            // pass computed maxSets (not raw displayAvailable)
+                            maxSetsForCard
                           )
                         }
                         className="w-12 text-center bg-transparent text-white font-medium outline-none"
@@ -902,17 +914,19 @@ export default function ItemsPage(): JSX.Element {
                       />
 
                       <button
-                        onClick={() => incSet(item.id, displayAvailable)}
+                        onClick={() => incSet(item.id, maxSetsForCard)}
                         className={`h-8 w-8 rounded-md flex items-center justify-center text-white ${
-                          thisSet >= (displayAvailable ?? Infinity)
+                          thisSet >= (maxSetsForCard ?? Infinity)
                             ? "bg-gray-700 cursor-not-allowed"
                             : "bg-blue-600 hover:bg-blue-700"
                         }`}
                         aria-label="increase sets"
                         type="button"
                         disabled={
-                          typeof displayAvailable === "number" &&
-                          thisSet >= displayAvailable
+                          // disable if we've reached the max sets for currently selected colours
+                          typeof maxSetsForCard === "number"
+                            ? thisSet >= maxSetsForCard
+                            : false
                         }
                       >
                         +
@@ -933,7 +947,33 @@ export default function ItemsPage(): JSX.Element {
 
                   <div className="mt-auto">
                     <button
-                      onClick={() => handleAddToCart(item)}
+                      onClick={() => {
+                        // additional guard: if selected sets * colours exceed available, show message/clamp
+                        const sel = Array.isArray(cardSelectedColors[item.id])
+                          ? cardSelectedColors[item.id]
+                          : [];
+                        const cc = Math.max(1, sel.length || 1);
+                        const setsRequested = Math.max(
+                          0,
+                          Math.floor(Number(setsMap[item.id] ?? 1))
+                        );
+                        if (
+                          typeof displayAvailable === "number" &&
+                          displayAvailable > 0 &&
+                          setsRequested * cc > displayAvailable
+                        ) {
+                          alert(
+                            `Only ${displayAvailable} pieces available (requested ${
+                              setsRequested * cc
+                            }). Reduce sets or colours.`
+                          );
+                          // clamp UI to max allowed
+                          const maxSets = Math.floor(displayAvailable / cc);
+                          setSetsMap((m) => ({ ...m, [item.id]: maxSets }));
+                          return;
+                        }
+                        handleAddToCart(item);
+                      }}
                       className={`w-full flex items-center justify-center gap-2 py-3 px-4 rounded font-semibold text-white transition-colors ${
                         wasAdded
                           ? "bg-green-600 hover:bg-green-700"
@@ -941,7 +981,17 @@ export default function ItemsPage(): JSX.Element {
                       }`}
                       aria-pressed={wasAdded}
                       disabled={
-                        displayAvailable === 0 || (setsMap[item.id] ?? 1) === 0
+                        displayAvailable === 0 ||
+                        (setsMap[item.id] ?? 1) === 0 ||
+                        // also disable if sets * colours > available
+                        (typeof displayAvailable === "number" &&
+                          displayAvailable > 0 &&
+                          (setsMap[item.id] ?? 1) *
+                            Math.max(
+                              1,
+                              (cardSelectedColors[item.id] || []).length || 1
+                            ) >
+                            displayAvailable)
                       }
                     >
                       {wasAdded ? (
