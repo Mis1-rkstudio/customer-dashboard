@@ -1,4 +1,3 @@
-// app/(pages)/cart/page.tsx
 "use client";
 
 import React, { useMemo, useState } from "react";
@@ -21,6 +20,7 @@ type UpdatePayload = Partial<{
   quantity: number;
   selectedColors: string[];
   selectedColor: string;
+  sizes: Record<string, number>;
 }>;
 
 type CartContextType = {
@@ -122,6 +122,39 @@ function getSelectedColors(item: CartItem): string[] {
 }
 
 /* ---------------------------
+   Sizes helpers
+   --------------------------- */
+
+/** Get sizes map from cart item. Prefer explicit `sizes` field (object), else try `raw.Sizes` or `raw.sizes` arrays. */
+function getSizesMapFromItem(item: CartItem): Record<string, number> {
+  // if item has a sizes object (from addToCart) use it
+  const asSizes = (item as unknown as Record<string, unknown>)["sizes"];
+  if (isObject(asSizes)) {
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(asSizes as Record<string, unknown>)) {
+      out[String(k)] = safeNumber(v);
+    }
+    return out;
+  }
+
+  // fallback to raw payload's Sizes array (if present) — initialize to 1 set each
+  if (isObject((item as unknown as Record<string, unknown>).raw)) {
+    const raw = (item as unknown as Record<string, unknown>).raw as Record<
+      string,
+      unknown
+    >;
+    const arr = (raw["Sizes"] ?? raw["sizes"]) as unknown;
+    if (Array.isArray(arr) && arr.length > 0) {
+      const out: Record<string, number> = {};
+      for (const s of arr) out[String(s)] = 1;
+      return out;
+    }
+  }
+
+  return {};
+}
+
+/* ---------------------------
    Main component
    --------------------------- */
 
@@ -140,11 +173,21 @@ export default function CartPage(): React.ReactElement {
     useState<ShareOrderShape | null>(null);
 
   const itemCount: number = Array.isArray(cartItems) ? cartItems.length : 0;
+
+  // compute total sets more accurately: if sizes present, count sum(sizes) per item, else use set/quantity
   const totalSets: number =
     typeof getTotalSets === "function"
       ? getTotalSets()
       : Array.isArray(cartItems)
       ? cartItems.reduce((s, it) => {
+          const sizesMap = getSizesMapFromItem(it);
+          if (Object.keys(sizesMap).length > 0) {
+            const sumSizes = Object.values(sizesMap).reduce(
+              (a, b) => a + (safeNumber(b) || 0),
+              0
+            );
+            return s + sumSizes;
+          }
           return (
             s +
             safeNumber(
@@ -159,11 +202,7 @@ export default function CartPage(): React.ReactElement {
   /* ---- helpers that respect colors when counting pieces ---- */
 
   const inc = (it: CartItem): void => {
-    const cur = safeNumber(
-      (it as unknown as Record<string, unknown>).set ??
-        (it as unknown as Record<string, unknown>).quantity ??
-        0
-    );
+    // increment per-size if sizes exist, else increment sets
     const selectedColors =
       Array.isArray(
         (it as unknown as Record<string, unknown>).selectedColors
@@ -175,8 +214,39 @@ export default function CartPage(): React.ReactElement {
         : getSelectedColors(it);
 
     const colorsCount = Math.max(1, selectedColors.length || 1);
+    const sizesMap = getSizesMapFromItem(it);
     const available =
       getNumberField(it, "closingStock") + getNumberField(it, "productionQty");
+
+    if (Object.keys(sizesMap).length > 0) {
+      // increment each size by +1 (one set)
+      const sumCurrent = Object.values(sizesMap).reduce(
+        (a, b) => a + (safeNumber(b) || 0),
+        0
+      );
+      const sumAfter = sumCurrent + Object.keys(sizesMap).length; // because +1 per size adds number_of_sizes
+      const totalAfter = sumAfter * colorsCount;
+      if (available && totalAfter > available) {
+        alert(
+          `Only ${available} pieces available (requested ${totalAfter}). Reduce sets or colours.`
+        );
+        return;
+      }
+      const newSizes: Record<string, number> = {};
+      for (const k of Object.keys(sizesMap))
+        newSizes[k] = (safeNumber(sizesMap[k]) || 0) + 1;
+      // we store `set` as per-size value (match ItemsPage semantics) — pick one size value as representative
+      const representativePerSize = safeNumber(Object.values(newSizes)[0]);
+      updateItem(it.id, { sizes: newSizes, set: representativePerSize });
+      return;
+    }
+
+    // no sizes: operate on sets count
+    const cur = safeNumber(
+      (it as unknown as Record<string, unknown>).set ??
+        (it as unknown as Record<string, unknown>).quantity ??
+        0
+    );
     const totalAfter = (cur + 1) * colorsCount;
     if (available && totalAfter > available) {
       alert(
@@ -188,6 +258,20 @@ export default function CartPage(): React.ReactElement {
   };
 
   const dec = (it: CartItem): void => {
+    const sizesMap = getSizesMapFromItem(it);
+    if (Object.keys(sizesMap).length > 0) {
+      const sumCurrent = Object.values(sizesMap).reduce(
+        (a, b) => a + (safeNumber(b) || 0),
+        0
+      );
+      const newSizes: Record<string, number> = {};
+      for (const k of Object.keys(sizesMap))
+        newSizes[k] = Math.max(0, (safeNumber(sizesMap[k]) || 0) - 1);
+      const representativePerSize = safeNumber(Object.values(newSizes)[0] ?? 0);
+      updateItem(it.id, { sizes: newSizes, set: representativePerSize });
+      return;
+    }
+
     const cur = safeNumber(
       (it as unknown as Record<string, unknown>).set ??
         (it as unknown as Record<string, unknown>).quantity ??
@@ -197,7 +281,7 @@ export default function CartPage(): React.ReactElement {
   };
 
   const onSetChange = (it: CartItem, v: number | string): void => {
-    const n = Math.max(0, Number(v) || 0);
+    const n = Math.max(0, Number(v) || 0); // n interpreted as per-size count when sizes exist
     const selectedColors =
       Array.isArray(
         (it as unknown as Record<string, unknown>).selectedColors
@@ -211,6 +295,32 @@ export default function CartPage(): React.ReactElement {
     const colorsCount = Math.max(1, selectedColors.length || 1);
     const available =
       getNumberField(it, "closingStock") + getNumberField(it, "productionQty");
+
+    const sizesMap = getSizesMapFromItem(it);
+    if (Object.keys(sizesMap).length > 0) {
+      // If sizes exist we treat `n` as per-size value: set each size to `n`, but check total
+      const numSizes = Object.keys(sizesMap).length;
+      const sumAfter = n * numSizes;
+      const totalAfter = sumAfter * colorsCount;
+      if (available && totalAfter > available) {
+        alert(`Only ${available} pieces available (requested ${totalAfter}).`);
+        const allowedPerColor = Math.floor(available / colorsCount);
+        const allowedPerSize = Math.floor(
+          allowedPerColor / Math.max(1, numSizes)
+        );
+        const newSizes: Record<string, number> = {};
+        for (const k of Object.keys(sizesMap)) newSizes[k] = allowedPerSize;
+        updateItem(it.id, { sizes: newSizes, set: allowedPerSize });
+        return;
+      }
+      // set each size to n
+      const newSizes: Record<string, number> = {};
+      for (const k of Object.keys(sizesMap)) newSizes[k] = n;
+      updateItem(it.id, { sizes: newSizes, set: n });
+      return;
+    }
+
+    // no sizes
     const totalAfter = n * colorsCount;
     if (available && totalAfter > available) {
       alert(`Only ${available} pieces available (requested ${totalAfter}).`);
@@ -219,6 +329,61 @@ export default function CartPage(): React.ReactElement {
       return;
     }
     updateItem(it.id, { set: n });
+  };
+
+  const onSizeInputChange = (
+    it: CartItem,
+    sizeLabel: string,
+    rawValue: string
+  ) => {
+    const parsed = Math.max(0, Math.floor(Number(rawValue || 0)));
+    const sizesMap = getSizesMapFromItem(it);
+    const prev = { ...sizesMap };
+    prev[sizeLabel] = parsed;
+
+    const selectedColors =
+      Array.isArray(
+        (it as unknown as Record<string, unknown>).selectedColors
+      ) &&
+      ((it as unknown as Record<string, unknown>).selectedColors as unknown[])
+        .length > 0
+        ? ((it as unknown as Record<string, unknown>)
+            .selectedColors as string[])
+        : getSelectedColors(it);
+
+    const colorsCount = Math.max(1, selectedColors.length || 1);
+    const available =
+      getNumberField(it, "closingStock") + getNumberField(it, "productionQty");
+    const sumSizes = Object.values(prev).reduce(
+      (a, b) => a + (safeNumber(b) || 0),
+      0
+    );
+
+    if (available && sumSizes * colorsCount > available) {
+      // clamp only the edited size to fit
+      const otherSum = Object.entries(prev).reduce(
+        (acc, [k, v]) => acc + (k === sizeLabel ? 0 : safeNumber(v) || 0),
+        0
+      );
+      const maxForThisSize = Math.max(
+        0,
+        Math.floor(available / colorsCount) - otherSum
+      );
+      prev[sizeLabel] = Math.max(0, Math.min(prev[sizeLabel], maxForThisSize));
+      alert(
+        `Only ${available} pieces available. Adjusted "${sizeLabel}" to ${prev[sizeLabel]}.`
+      );
+    }
+
+    const sumAfter = Object.values(prev).reduce(
+      (a, b) => a + (safeNumber(b) || 0),
+      0
+    );
+    // store `set` as representative per-size if sizes are uniform, else store sum as fallback
+    const values = Object.values(prev).map((v) => safeNumber(v));
+    const allEqual = values.every((x) => x === values[0]);
+    const representative = allEqual ? values[0] : sumAfter;
+    updateItem(it.id, { sizes: prev, set: representative });
   };
 
   const onColorToggle = (it: CartItem, color: string): void => {
@@ -237,6 +402,7 @@ export default function CartPage(): React.ReactElement {
     if (idx >= 0) prev.splice(idx, 1);
     else prev.push(color);
 
+    const sizesMap = getSizesMapFromItem(it);
     const sets = safeNumber(
       (it as unknown as Record<string, unknown>).set ??
         (it as unknown as Record<string, unknown>).quantity ??
@@ -245,6 +411,34 @@ export default function CartPage(): React.ReactElement {
     const colorsCount = Math.max(1, prev.length || 1);
     const available =
       getNumberField(it, "closingStock") + getNumberField(it, "productionQty");
+
+    if (Object.keys(sizesMap).length > 0) {
+      const sumSizes = Object.values(sizesMap).reduce(
+        (a, b) => a + (safeNumber(b) || 0),
+        0
+      );
+      if (available && sumSizes * colorsCount > available) {
+        // clamp evenly across sizes
+        const allowedTotalPerColor = Math.floor(available / colorsCount);
+        const sizeKeys = Object.keys(sizesMap);
+        const allowedPerSize =
+          sizeKeys.length > 0
+            ? Math.floor(allowedTotalPerColor / Math.max(1, sizeKeys.length))
+            : 0;
+        const newSizes: Record<string, number> = {};
+        for (const k of sizeKeys) newSizes[k] = allowedPerSize;
+        updateItem(it.id, {
+          selectedColors: prev,
+          sizes: newSizes,
+          set: allowedPerSize,
+        });
+        return;
+      }
+      updateItem(it.id, { selectedColors: prev });
+      return;
+    }
+
+    // no sizes
     if (available && sets * colorsCount > available) {
       const maxSets = Math.floor(available / colorsCount);
       updateItem(it.id, { selectedColors: prev, set: Math.max(0, maxSets) });
@@ -259,29 +453,51 @@ export default function CartPage(): React.ReactElement {
     setApplying(true);
     try {
       for (const it of cartItems) {
-        const colorsCount = Math.max(
-          1,
+        const selectedColorsArr =
           Array.isArray(
             (it as unknown as Record<string, unknown>).selectedColors
           ) &&
-            (
-              (it as unknown as Record<string, unknown>)
-                .selectedColors as unknown[]
-            ).length > 0
-            ? (
-                (it as unknown as Record<string, unknown>)
-                  .selectedColors as unknown[]
-              ).length
-            : getAvailableColors(it).length || 1
-        );
+          (
+            (it as unknown as Record<string, unknown>)
+              .selectedColors as unknown[]
+          ).length > 0
+            ? ((it as unknown as Record<string, unknown>)
+                .selectedColors as unknown[])
+            : getSelectedColors(it);
+
+        const colorsCount = Math.max(1, selectedColorsArr.length || 1);
         const avail =
           getNumberField(it, "closingStock") +
           getNumberField(it, "productionQty");
-        if (avail && n * colorsCount > avail) {
-          const maxSets = Math.floor(avail / colorsCount);
-          updateItem(it.id, { set: Math.max(0, maxSets) });
+
+        const sizesMap = getSizesMapFromItem(it);
+        if (Object.keys(sizesMap).length > 0) {
+          const numSizes = Object.keys(sizesMap).length;
+          // `n` is per-size value. total pieces would be n * numSizes * colorsCount
+          if (avail && n * numSizes * colorsCount > avail) {
+            // clamp: compute per-size allowed value
+            const allowedPerColor = Math.floor(avail / colorsCount);
+            const allowedPerSize = Math.floor(
+              allowedPerColor / Math.max(1, numSizes)
+            );
+            const newSizes: Record<string, number> = {};
+            for (const k of Object.keys(sizesMap)) newSizes[k] = allowedPerSize;
+            updateItem(it.id, {
+              sizes: newSizes,
+              set: Math.max(0, allowedPerSize),
+            });
+          } else {
+            const newSizes: Record<string, number> = {};
+            for (const k of Object.keys(sizesMap)) newSizes[k] = n;
+            updateItem(it.id, { sizes: newSizes, set: n });
+          }
         } else {
-          updateItem(it.id, { set: n });
+          if (avail && n * colorsCount > avail) {
+            const maxSets = Math.floor(avail / colorsCount);
+            updateItem(it.id, { set: Math.max(0, maxSets) });
+          } else {
+            updateItem(it.id, { set: n });
+          }
         }
       }
     } finally {
@@ -369,6 +585,8 @@ export default function CartPage(): React.ReactElement {
       const itemsPayload: Record<string, unknown>[] = [];
 
       for (const it of cartItems) {
+        // If sizes exist, we will expand per-color per-size (respecting selectedColors)
+        const sizesMap = getSizesMapFromItem(it);
         const qty = safeNumber(
           (it as unknown as Record<string, unknown>).set ??
             (it as unknown as Record<string, unknown>).quantity ??
@@ -388,15 +606,44 @@ export default function CartPage(): React.ReactElement {
             getStringField(it as unknown, "name") ??
             getStringField(it as unknown, "Item") ??
             undefined,
-          qty,
         };
 
-        if (selectedColors.length > 0) {
-          for (const c of selectedColors) {
-            itemsPayload.push({ ...base, qty, color: String(c ?? "").trim() });
+        if (Object.keys(sizesMap).length > 0) {
+          // push one payload per selected color per size with qty = size-qty
+          if (selectedColors.length > 0) {
+            for (const c of selectedColors) {
+              for (const [sizeLabel, sizeQty] of Object.entries(sizesMap)) {
+                itemsPayload.push({
+                  ...base,
+                  qty: safeNumber(sizeQty),
+                  color: String(c ?? "").trim(),
+                  size: sizeLabel,
+                });
+              }
+            }
+          } else {
+            for (const [sizeLabel, sizeQty] of Object.entries(sizesMap)) {
+              itemsPayload.push({
+                ...base,
+                qty: safeNumber(sizeQty),
+                color: "",
+                size: sizeLabel,
+              });
+            }
           }
         } else {
-          itemsPayload.push({ ...base, qty, color: "" });
+          // legacy: one payload per selected color (qty = sets), or one payload without color
+          if (selectedColors.length > 0) {
+            for (const c of selectedColors) {
+              itemsPayload.push({
+                ...base,
+                qty,
+                color: String(c ?? "").trim(),
+              });
+            }
+          } else {
+            itemsPayload.push({ ...base, qty, color: "" });
+          }
         }
       }
 
@@ -571,11 +818,35 @@ export default function CartPage(): React.ReactElement {
               </div>
             ) : (
               cartItems.map((item: CartItem) => {
-                const qty = safeNumber(
+                const sizesMap = getSizesMapFromItem(item);
+                const numSizes = Object.keys(sizesMap).length;
+                const sumSizes = Object.values(sizesMap).reduce(
+                  (a, b) => a + (safeNumber(b) || 0),
+                  0
+                );
+
+                // Determine display for the main qty input:
+                // - if sizes exist and all sizes are equal -> show per-size value
+                // - else if sizes exist but not equal -> show sumSizes (fallback)
+                // - else show legacy set/quantity
+                const qtyFromSets = safeNumber(
                   (item as unknown as Record<string, unknown>).set ??
                     (item as unknown as Record<string, unknown>).quantity ??
                     0
                 );
+
+                let displayQty: number;
+                if (numSizes > 0) {
+                  const vals = Object.values(sizesMap).map((v) =>
+                    safeNumber(v)
+                  );
+                  const allEqual = vals.every((x) => x === vals[0]);
+                  displayQty = allEqual ? vals[0] : sumSizes;
+                } else {
+                  displayQty = qtyFromSets;
+                }
+
+                // total pieces uses sumSizes when sizes exist; else qty * colors
                 const selectedColors: string[] = Array.isArray(
                   (item as unknown as Record<string, unknown>).selectedColors
                 )
@@ -586,10 +857,14 @@ export default function CartPage(): React.ReactElement {
                 const available =
                   getNumberField(item, "closingStock") +
                   getNumberField(item, "productionQty");
-                const totalPieces = Math.max(
-                  0,
-                  qty * Math.max(1, selectedColors.length || 1)
-                );
+
+                const totalPieces =
+                  numSizes > 0
+                    ? sumSizes * Math.max(1, selectedColors.length || 1)
+                    : Math.max(
+                        0,
+                        displayQty * Math.max(1, selectedColors.length || 1)
+                      );
 
                 const rawImage =
                   getStringField(item as unknown, "image") ??
@@ -615,7 +890,7 @@ export default function CartPage(): React.ReactElement {
                       <Trash2 className="w-4 h-4" />
                     </button>
 
-                    <div className="grid grid-cols-[88px_1fr_220px] gap-6 items-start p-6">
+                    <div className="grid grid-cols-[88px_1fr_260px] gap-6 items-start p-6">
                       <div className="w-20 h-20 rounded-md overflow-hidden bg-[#0f1724] flex items-center justify-center">
                         <Image
                           src={imageSrc}
@@ -683,9 +958,43 @@ export default function CartPage(): React.ReactElement {
                             })
                           )}
                         </div>
+
+                        {/* sizes: show editable boxes when sizes exist */}
+                        {numSizes > 0 && (
+                          <div className="mt-4">
+                            <div className="text-sm text-slate-300 mb-2">
+                              Sizes
+                            </div>
+                            <div className="grid grid-cols-3 gap-2">
+                              {Object.keys(sizesMap).map((sz) => (
+                                <div
+                                  key={sz}
+                                  className="flex items-center gap-2"
+                                >
+                                  <div className="text-sm text-gray-200 w-20">
+                                    {sz}
+                                  </div>
+                                  <input
+                                    inputMode="numeric"
+                                    pattern="[0-9]*"
+                                    value={String(sizesMap[sz] ?? 0)}
+                                    onChange={(e) =>
+                                      onSizeInputChange(
+                                        item,
+                                        sz,
+                                        e.target.value
+                                      )
+                                    }
+                                    className="w-20 text-center bg-transparent text-white font-medium outline-none border border-[#12202a] rounded px-2 py-1"
+                                  />
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
                       </div>
 
-                      <div className="flex flex-col items-end gap-4 pr-12 self-start">
+                      <div className="flex flex-col items-end gap-4 pr-6 self-start">
                         <div className="inline-flex items-center gap-2 bg-[#051116] border border-[#12303a] rounded-lg px-2 py-1">
                           <button
                             onClick={() => dec(item)}
@@ -699,7 +1008,7 @@ export default function CartPage(): React.ReactElement {
                           <input
                             type="number"
                             min={0}
-                            value={String(qty)}
+                            value={String(displayQty)}
                             onChange={(e) =>
                               onSetChange(item, Number(e.target.value))
                             }
@@ -737,7 +1046,9 @@ export default function CartPage(): React.ReactElement {
                             </span>{" "}
                             {selectedColors.length > 0 ? (
                               <span className="text-slate-400">
-                                ({qty} × {selectedColors.length} colours)
+                                {numSizes > 0
+                                  ? `(${sumSizes} × ${selectedColors.length} colours)`
+                                  : `(${displayQty} × ${selectedColors.length} colours)`}
                               </span>
                             ) : null}
                           </div>

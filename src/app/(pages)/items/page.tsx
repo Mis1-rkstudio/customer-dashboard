@@ -1,7 +1,12 @@
-// app/items/page.tsx  (replace your file contents with this)
 "use client";
 
-import React, { JSX, useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import Select, { StylesConfig } from "react-select";
 import { Tag, Zap } from "lucide-react";
 import { useCart } from "@/context/CartContext";
@@ -14,6 +19,7 @@ type ItemRow = {
   id: string;
   name: string;
   colors: string[];
+  sizes?: string[]; // NEW: sizes list from API (strings like "38.0")
   image: string | null;
   concept?: string | null;
   fabric?: string | null;
@@ -35,6 +41,7 @@ type CartAddItem = {
   raw?: Record<string, unknown>;
   set?: number;
   selectedColors?: string[];
+  sizes?: Record<string, number> | undefined; // per-size quantities (optional)
   productionQty?: number | null;
   closingStock?: number | null;
 };
@@ -176,7 +183,7 @@ function useDebounced(value: string, delay = 250): string {
   return v;
 }
 
-export default function ItemsPage(): JSX.Element {
+export default function ItemsPage(): React.ReactElement {
   const [items, setItems] = useState<ItemRow[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const { addToCart } = useCart() as CartContextMinimal;
@@ -186,6 +193,11 @@ export default function ItemsPage(): JSX.Element {
   const [setsMap, setSetsMap] = useState<Record<string, number>>({});
   const [cardSelectedColors, setCardSelectedColors] = useState<
     Record<string, string[]>
+  >({});
+
+  // per-card per-size quantities: sizesMap[itemId] = { "38.0": 1, "40.0": 1 }
+  const [sizesMap, setSizesMap] = useState<
+    Record<string, Record<string, number>>
   >({});
 
   // search + filters
@@ -252,6 +264,12 @@ export default function ItemsPage(): JSX.Element {
                 .map((c) => String(c ?? "").trim())
                 .filter(Boolean)
             : [];
+          const sizes =
+            Array.isArray(rec["Sizes"]) || Array.isArray(rec["sizes"])
+              ? ((rec["Sizes"] ?? rec["sizes"]) as unknown[]).map((s) =>
+                  String(s ?? "").trim()
+                )
+              : undefined;
           const thumbnail = (rec["Thumbnail_URL"] ??
             rec["thumbnail"] ??
             rec["thumbnail_url"] ??
@@ -262,10 +280,9 @@ export default function ItemsPage(): JSX.Element {
             rec["FileUrl_raw"]) as string | undefined;
           const fileUrl = getCleanFileUrl(rawFileUrl);
           const image = (fileUrl || thumbnail) ?? null;
-          const concept = (rec["Concept"] ??
-            rec["Concept_2"] ??
-            rec["Concept_1"] ??
-            null) as string | null;
+          const concept = (rec["Concept"] ?? rec["Concept_2"] ?? null) as
+            | string
+            | null;
           const fabric = (rec["Fabric"] ?? rec["Concept_3"] ?? null) as
             | string
             | null;
@@ -320,6 +337,7 @@ export default function ItemsPage(): JSX.Element {
             id,
             name,
             colors,
+            sizes,
             image,
             concept,
             fabric,
@@ -410,6 +428,51 @@ export default function ItemsPage(): JSX.Element {
       canceled = true;
     };
   }, [itemsLoaded]);
+
+  // initialize per-item setsMap and sizesMap for new items
+  useEffect(() => {
+    if (!items || items.length === 0) return;
+    setSetsMap((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const it of items) {
+        if (!(it.id in next)) {
+          next[it.id] = 1;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+
+    setSizesMap((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const it of items) {
+        if (!(it.id in next)) {
+          const sizesObj: Record<string, number> = {};
+          if (Array.isArray(it.sizes) && it.sizes.length > 0) {
+            for (const s of it.sizes) sizesObj[String(s)] = 1;
+          }
+          next[it.id] = sizesObj;
+          changed = true;
+        } else {
+          // ensure keys exist for new sizes (if API changed)
+          const existing = next[it.id] ?? {};
+          if (Array.isArray(it.sizes) && it.sizes.length > 0) {
+            for (const s of it.sizes) {
+              if (!(String(s) in existing)) {
+                existing[String(s)] = setsMap[it.id] ?? 1;
+                changed = true;
+              }
+            }
+            next[it.id] = { ...existing };
+          }
+        }
+      }
+      return changed ? next : prev;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items]);
 
   // options for selects
   const conceptOptions = useMemo(
@@ -566,24 +629,91 @@ export default function ItemsPage(): JSX.Element {
   }
 
   // per-card set handlers and color toggle
-  const incSet = (id: string, max: number | null) =>
+  const incSet = (id: string) =>
     setSetsMap((m) => {
       const cur = Math.max(0, Number(m[id] ?? 1));
-      if (typeof max === "number" && !Number.isNaN(max) && cur + 1 > max)
-        return m;
+      const item = items.find((it) => it.id === id);
+      if (!item) return m;
+
+      const sizesForItem = sizesMap[id] ?? {};
+      const numSizes = Object.keys(sizesForItem).length;
+      const sel = Array.isArray(cardSelectedColors[id])
+        ? cardSelectedColors[id]
+        : [];
+      const colorsCount = Math.max(1, sel.length || 1);
+      const displayAvailable =
+        typeof item.closingStock === "number" ? item.closingStock : 0;
+      const prod =
+        typeof item.productionQty === "number" ? item.productionQty : 0;
+      const available = Math.max(0, displayAvailable + prod);
+
+      // determine increment semantics: if sizes exist, inc means +1 per size (per-size++)
+      if (numSizes > 0) {
+        // representative per-size value currently = cur (we keep setsMap as per-size)
+        // check if increasing per-size to cur+1 will overflow: total pieces = (cur+1)*numSizes*colorsCount
+        const nextPerSize = cur + 1;
+        const totalAfter = nextPerSize * numSizes * colorsCount;
+        if (available > 0 && totalAfter > available) return m;
+        // propagate to sizesMap: every size becomes `nextPerSize`
+        setSizesMap((smap) => {
+          const newSizes: Record<string, number> = {};
+          const keys = Object.keys(sizesForItem);
+          for (const key of keys) newSizes[key] = nextPerSize;
+          return { ...smap, [id]: newSizes };
+        });
+        return { ...m, [id]: nextPerSize };
+      }
+
+      // no sizes -> simple sets increment
+      if (available > 0 && (cur + 1) * colorsCount > available) return m;
       return { ...m, [id]: cur + 1 };
     });
 
   const decSet = (id: string) =>
     setSetsMap((m) => {
       const cur = Math.max(0, Number(m[id] ?? 1));
-      return { ...m, [id]: Math.max(0, cur - 1) };
+      const next = Math.max(0, cur - 1);
+      const item = items.find((it) => it.id === id);
+      if (!item) return m;
+
+      const sizesForItem = sizesMap[id] ?? {};
+      const numSizes = Object.keys(sizesForItem).length;
+
+      if (numSizes > 0) {
+        // propagate decrement to sizes
+        setSizesMap((smap) => {
+          const prevSizes = smap[id] ?? {};
+          const newSizes: Record<string, number> = {};
+          for (const k of Object.keys(prevSizes))
+            newSizes[k] = Math.max(0, (Number(prevSizes[k]) || 0) - 1);
+          return { ...smap, [id]: newSizes };
+        });
+        return { ...m, [id]: next };
+      }
+
+      // no sizes
+      return { ...m, [id]: next };
     });
 
   const setSet = (id: string, v: number, max: number | null) =>
     setSetsMap((m) => {
       let n = Math.max(0, Math.floor(Number(v) || 0));
       if (typeof max === "number" && !Number.isNaN(max)) n = Math.min(n, max);
+      const item = items.find((it) => it.id === id);
+      if (!item) return m;
+
+      const sizesForItem = sizesMap[id] ?? {};
+      const numSizes = Object.keys(sizesForItem).length;
+
+      if (numSizes > 0) {
+        // interpret n as per-size; propagate to sizes
+        setSizesMap((smap) => {
+          const newSizes: Record<string, number> = {};
+          for (const key of Object.keys(sizesForItem)) newSizes[key] = n;
+          return { ...smap, [id]: newSizes };
+        });
+      }
+
       return { ...m, [id]: n };
     });
 
@@ -595,56 +725,192 @@ export default function ItemsPage(): JSX.Element {
       );
       if (idx >= 0) existing.splice(idx, 1);
       else existing.push(color);
-      return { ...prev, [id]: existing };
+
+      const next = { ...prev, [id]: existing };
+      // clamp logic below using sizesMap + setsMap
+      const item = items.find((it) => it.id === id);
+      if (item) {
+        const closing =
+          typeof item.closingStock === "number" ? item.closingStock : 0;
+        const prod =
+          typeof item.productionQty === "number" ? item.productionQty : 0;
+        const displayAvailable = Math.max(0, closing + prod);
+        const cc = Math.max(1, existing.length || 1);
+        const sizesForItem = sizesMap[id] ?? {};
+        const sizeKeys = Object.keys(sizesForItem);
+        const sumSizes = Object.values(sizesForItem).reduce(
+          (a, b) => a + (Number(b) || 0),
+          0
+        );
+
+        if (displayAvailable > 0 && sumSizes * cc > displayAvailable) {
+          // clamp: allowed pieces per color = floor(displayAvailable / cc)
+          const allowedTotalPerColor = Math.floor(displayAvailable / cc);
+          const allowedPerSize =
+            sizeKeys.length > 0
+              ? Math.floor(allowedTotalPerColor / Math.max(1, sizeKeys.length))
+              : 0;
+          setSizesMap((s) => {
+            const copy = { ...s };
+            const newSizes: Record<string, number> = {};
+            for (const k of sizeKeys) newSizes[k] = allowedPerSize;
+            copy[id] = newSizes;
+            return copy;
+          });
+          setSetsMap((m) => ({ ...m, [id]: allowedPerSize }));
+        }
+      }
+
+      return next;
     });
   };
 
-  const handleAddToCart = (item: ItemRow) => {
-    // compute displayAvailable = closingStock + productionQty (visual only)
+  // user edits a single size input: update only that size; clamp if total * colors > available
+  const onSizeInputChange = useCallback(
+    (id: string, sizeLabel: string, rawValue: string) => {
+      const parsed = Math.max(0, Math.floor(Number(rawValue || 0)));
+      setSizesMap((smap) => {
+        const prev = smap[id] ?? {};
+        const nextSizes = { ...prev, [sizeLabel]: parsed };
+
+        const item = items.find((it) => it.id === id);
+        const sel = Array.isArray(cardSelectedColors[id])
+          ? cardSelectedColors[id]
+          : [];
+        const colorsCount = Math.max(1, sel.length || 1);
+        const displayAvailable = Math.max(
+          0,
+          (typeof item?.closingStock === "number" ? item!.closingStock : 0) +
+            (typeof item?.productionQty === "number" ? item!.productionQty : 0)
+        );
+
+        const sumSizes = Object.values(nextSizes).reduce(
+          (a, b) => a + (Number(b) || 0),
+          0
+        );
+
+        if (displayAvailable > 0 && sumSizes * colorsCount > displayAvailable) {
+          // clamp only the edited size to fit
+          const otherSum = Object.entries(nextSizes).reduce((acc, [k, v]) => {
+            return acc + (k === sizeLabel ? 0 : Number(v || 0));
+          }, 0);
+          const maxForThisSize = Math.max(
+            0,
+            Math.floor(displayAvailable / colorsCount) - otherSum
+          );
+          nextSizes[sizeLabel] = Math.max(0, maxForThisSize);
+          // brief alert
+          alert(
+            `Only ${displayAvailable} pieces available. Adjusted "${sizeLabel}" to ${nextSizes[sizeLabel]}.`
+          );
+        }
+
+        return { ...smap, [id]: nextSizes };
+      });
+      // do not change setsMap here — sets control remains authoritative for "propagate to all" actions
+    },
+    [cardSelectedColors, items]
+  );
+
+  // Compute displayAvailable helper
+  function computeDisplayAvailable(item: ItemRow): number {
     const closing =
       typeof item.closingStock === "number" ? item.closingStock : 0;
     const prod =
       typeof item.productionQty === "number" ? item.productionQty : 0;
-    const displayAvailable = Math.max(0, closing + prod);
+    return Math.max(0, closing + prod);
+  }
 
-    let setCount = Math.max(0, Math.floor(Number(setsMap[item.id] ?? 1)));
-    // if user selected colors, we treat `setCount` as the per-color sets (consistent with cart)
-    const sel = Array.isArray(cardSelectedColors[item.id])
-      ? cardSelectedColors[item.id]
-      : [];
-    const colorsCount = Math.max(1, sel.length || 1);
-    if (displayAvailable > 0 && setCount * colorsCount > displayAvailable) {
-      // clamp sets so sets * colorsCount <= displayAvailable
-      setCount = Math.floor(displayAvailable / colorsCount);
-      if (setCount < 0) setCount = 0;
-    }
+  // Add to cart: compute total pieces (prefer per-size sum if sizes present)
+  const handleAddToCart = useCallback(
+    (item: ItemRow) => {
+      const displayAvailable = computeDisplayAvailable(item);
 
-    if (displayAvailable === 0) {
-      alert("No available stock for this design.");
-      return;
-    }
+      const sel = Array.isArray(cardSelectedColors[item.id])
+        ? cardSelectedColors[item.id]
+        : [];
+      const colorsCount = Math.max(1, sel.length || 1);
 
-    addToCart({
-      id: item.id,
-      name: item.name,
-      image: item.image || "/placeholder.svg",
-      colors: item.colors,
-      raw: item.raw,
-      set: setCount,
-      selectedColors: sel,
-      productionQty: item.productionQty ?? null,
-      closingStock: item.closingStock ?? null,
-    });
+      const sizeKeys = Array.isArray(item.sizes) ? item.sizes : [];
+      const setCountFromSetsControl = Math.max(
+        0,
+        Math.floor(Number(setsMap[item.id] ?? 1))
+      );
 
-    setAddedMap((m) => ({ ...m, [item.id]: true }));
-    if (addTimersRef.current[item.id])
-      clearTimeout(addTimersRef.current[item.id]);
-    const timerId = window.setTimeout(() => {
-      setAddedMap((m) => ({ ...m, [item.id]: false }));
-      delete addTimersRef.current[item.id];
-    }, 2500);
-    addTimersRef.current[item.id] = timerId;
-  };
+      let totalPieces = 0;
+      let sizesPayload: Record<string, number> | undefined = undefined;
+
+      if (sizeKeys.length > 0) {
+        const perSize =
+          sizesMap[item.id] ??
+          Object.fromEntries(
+            sizeKeys.map((s) => [s, Math.max(0, setCountFromSetsControl)])
+          );
+        sizesPayload = perSize;
+        const sumSizes = Object.values(perSize).reduce(
+          (a, b) => a + (Number(b) || 0),
+          0
+        );
+        totalPieces = sumSizes * colorsCount;
+      } else {
+        totalPieces = setCountFromSetsControl * colorsCount;
+      }
+
+      if (displayAvailable > 0 && totalPieces > displayAvailable) {
+        // clamp and inform user
+        if (sizeKeys.length > 0) {
+          // clamp evenly across sizes (per-color)
+          const allowedPerSize = Math.floor(
+            displayAvailable / (colorsCount * Math.max(1, sizeKeys.length))
+          );
+          setSizesMap((smap) => {
+            const newSizes: Record<string, number> = {};
+            for (const k of sizeKeys) newSizes[k] = allowedPerSize;
+            return { ...smap, [item.id]: newSizes };
+          });
+          setSetsMap((m) => ({ ...m, [item.id]: allowedPerSize }));
+          alert(
+            `Only ${displayAvailable} pieces available. Adjusted sizes to ${allowedPerSize} each.`
+          );
+        } else {
+          const maxSetsIfNoSizes = Math.floor(displayAvailable / colorsCount);
+          setSetsMap((m) => ({ ...m, [item.id]: maxSetsIfNoSizes }));
+          alert(
+            `Only ${displayAvailable} pieces available. Adjusted sets to ${maxSetsIfNoSizes}.`
+          );
+        }
+        return;
+      }
+
+      if (displayAvailable === 0) {
+        alert("No available stock for this design.");
+        return;
+      }
+
+      addToCart({
+        id: item.id,
+        name: item.name,
+        image: item.image || "/placeholder.svg",
+        colors: item.colors,
+        raw: item.raw,
+        set: setCountFromSetsControl,
+        selectedColors: cardSelectedColors[item.id] ?? [],
+        sizes: sizesPayload,
+        productionQty: item.productionQty ?? null,
+        closingStock: item.closingStock ?? null,
+      });
+
+      setAddedMap((m) => ({ ...m, [item.id]: true }));
+      if (addTimersRef.current[item.id])
+        clearTimeout(addTimersRef.current[item.id]);
+      const timerId = window.setTimeout(() => {
+        setAddedMap((m) => ({ ...m, [item.id]: false }));
+        delete addTimersRef.current[item.id];
+      }, 2500);
+      addTimersRef.current[item.id] = timerId;
+    },
+    [addToCart, cardSelectedColors, sizesMap, setsMap]
+  );
 
   // render
   return (
@@ -731,11 +997,7 @@ export default function ItemsPage(): JSX.Element {
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-3 gap-6">
           {paginatedItems.map((item, index) => {
             const wasAdded = Boolean(addedMap[item.id]);
-            const closing =
-              typeof item.closingStock === "number" ? item.closingStock : 0;
-            const prod =
-              typeof item.productionQty === "number" ? item.productionQty : 0;
-            const displayAvailable = Math.max(0, closing + prod);
+            const displayAvailable = computeDisplayAvailable(item);
             const stockNumber = displayAvailable;
             const meta = stockMeta(stockNumber);
             const visible = !!visibleRef.current[item.id];
@@ -744,17 +1006,51 @@ export default function ItemsPage(): JSX.Element {
             const thisSet = setsMap[item.id] ?? 1;
             const selectedColorsForCard = cardSelectedColors[item.id] ?? [];
 
-            // ----- NEW: compute colorsCount and max sets allowed based on pieces -----
+            // NEW: sizes UI values
+            const sizesForItem = sizesMap[item.id] ?? {};
+            const sizeKeys = Array.isArray(item.sizes)
+              ? item.sizes
+              : Object.keys(sizesForItem);
+            const numSizes = sizeKeys.length;
+            const sumSizes = Object.values(sizesForItem).reduce(
+              (a, b) => a + (Number(b) || 0),
+              0
+            );
+
+            // Determine display for the main qty input:
+            // - if sizes exist and all sizes are equal -> show per-size value
+            // - else if sizes exist but not equal -> show sumSizes (fallback)
+            // - else show legacy set control value
+            let displayQty: number;
+            if (numSizes > 0) {
+              const vals = Object.values(sizesForItem).map((v) =>
+                Number(v || 0)
+              );
+              const allEqual =
+                vals.length > 0 && vals.every((x) => x === vals[0]);
+              displayQty = allEqual ? vals[0] : sumSizes;
+            } else {
+              displayQty = thisSet;
+            }
+
+            // compute total requested pieces (prefer per-size sums if sizes exist)
             const colorsCount = Math.max(
               1,
               (selectedColorsForCard || []).length || 1
             );
+            const totalRequestedPieces =
+              (numSizes > 0 ? sumSizes : thisSet) * colorsCount;
+
+            // max sets allowed based on available pieces (one "set" means per-size increment when sizes exist)
             const maxSetsForCard =
               typeof displayAvailable === "number" && displayAvailable >= 0
-                ? Math.floor(displayAvailable / colorsCount)
-                : null; // null => no limit
+                ? numSizes > 0
+                  ? Math.floor(
+                      displayAvailable / (colorsCount * Math.max(1, numSizes))
+                    )
+                  : Math.floor(displayAvailable / colorsCount)
+                : null;
 
-            // show tile
             return (
               <article
                 key={item.id || `${item.name}-${index}`}
@@ -885,6 +1181,36 @@ export default function ItemsPage(): JSX.Element {
                     </div>
                   </div>
 
+                  {/* SIZES: show boxes for each size (if available) */}
+                  {sizeKeys && sizeKeys.length > 0 && (
+                    <>
+                      <div className="text-sm text-gray-300 mb-2">Sizes</div>
+                      <div className="grid grid-cols-2 gap-3 mb-3">
+                        {sizeKeys.map((sz) => {
+                          const val = sizesForItem[sz] ?? setsMap[item.id] ?? 1;
+                          return (
+                            <div
+                              key={sz}
+                              className="border border-gray-700 rounded px-3 py-2 flex items-center justify-between"
+                            >
+                              <div className="text-sm text-gray-200">{sz}</div>
+                              <input
+                                inputMode="numeric"
+                                pattern="[0-9]*"
+                                value={String(val)}
+                                onChange={(e) =>
+                                  onSizeInputChange(item.id, sz, e.target.value)
+                                }
+                                className="w-14 text-center bg-transparent text-white font-medium outline-none"
+                                aria-label={`Qty for size ${sz}`}
+                              />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+
                   {/* per-card set selector */}
                   <div className="mb-3 flex items-center gap-3">
                     <div className="inline-flex items-center gap-2 bg-[#051116] border border-[#12303a] rounded-lg px-2 py-1">
@@ -900,12 +1226,11 @@ export default function ItemsPage(): JSX.Element {
                       <input
                         inputMode="numeric"
                         pattern="[0-9]*"
-                        value={String(thisSet)}
+                        value={String(displayQty)}
                         onChange={(e) =>
                           setSet(
                             item.id,
                             Number(e.target.value || 0),
-                            // pass computed maxSets (not raw displayAvailable)
                             maxSetsForCard
                           )
                         }
@@ -914,18 +1239,17 @@ export default function ItemsPage(): JSX.Element {
                       />
 
                       <button
-                        onClick={() => incSet(item.id, maxSetsForCard)}
+                        onClick={() => incSet(item.id)}
                         className={`h-8 w-8 rounded-md flex items-center justify-center text-white ${
-                          thisSet >= (maxSetsForCard ?? Infinity)
+                          displayQty >= (maxSetsForCard ?? Infinity)
                             ? "bg-gray-700 cursor-not-allowed"
                             : "bg-blue-600 hover:bg-blue-700"
                         }`}
                         aria-label="increase sets"
                         type="button"
                         disabled={
-                          // disable if we've reached the max sets for currently selected colours
                           typeof maxSetsForCard === "number"
-                            ? thisSet >= maxSetsForCard
+                            ? displayQty >= maxSetsForCard
                             : false
                         }
                       >
@@ -957,19 +1281,39 @@ export default function ItemsPage(): JSX.Element {
                           0,
                           Math.floor(Number(setsMap[item.id] ?? 1))
                         );
+                        const sizesSum = Object.values(
+                          sizesMap[item.id] ?? {}
+                        ).reduce((a, b) => a + (Number(b) || 0), 0);
+                        const requested =
+                          (numSizes > 0 ? sizesSum : setsRequested) * cc;
                         if (
                           typeof displayAvailable === "number" &&
                           displayAvailable > 0 &&
-                          setsRequested * cc > displayAvailable
+                          requested > displayAvailable
                         ) {
                           alert(
-                            `Only ${displayAvailable} pieces available (requested ${
-                              setsRequested * cc
-                            }). Reduce sets or colours.`
+                            `Only ${displayAvailable} pieces available (requested ${requested}). Reduce sets or colours.`
                           );
                           // clamp UI to max allowed
-                          const maxSets = Math.floor(displayAvailable / cc);
+                          const maxSets =
+                            numSizes > 0
+                              ? Math.floor(
+                                  displayAvailable /
+                                    (cc * Math.max(1, numSizes))
+                                )
+                              : Math.floor(displayAvailable / cc);
                           setSetsMap((m) => ({ ...m, [item.id]: maxSets }));
+                          if (sizeKeys.length > 0) {
+                            const perSizeAllowed = Math.floor(
+                              (maxSets * 1) / Math.max(1, sizeKeys.length)
+                            );
+                            setSizesMap((s) => ({
+                              ...s,
+                              [item.id]: Object.fromEntries(
+                                sizeKeys.map((k) => [k, perSizeAllowed])
+                              ),
+                            }));
+                          }
                           return;
                         }
                         handleAddToCart(item);
@@ -983,15 +1327,10 @@ export default function ItemsPage(): JSX.Element {
                       disabled={
                         displayAvailable === 0 ||
                         (setsMap[item.id] ?? 1) === 0 ||
-                        // also disable if sets * colours > available
+                        // also disable if requested > available
                         (typeof displayAvailable === "number" &&
                           displayAvailable > 0 &&
-                          (setsMap[item.id] ?? 1) *
-                            Math.max(
-                              1,
-                              (cardSelectedColors[item.id] || []).length || 1
-                            ) >
-                            displayAvailable)
+                          totalRequestedPieces > displayAvailable)
                       }
                     >
                       {wasAdded ? (
