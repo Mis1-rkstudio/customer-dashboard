@@ -1,8 +1,8 @@
-'use client';
-import React, { JSX, useEffect, useState } from 'react';
-import CreatableSelect from 'react-select/creatable';
-import { StylesConfig, CSSObjectWithLabel } from 'react-select';
-import { FaTrash, FaPencilAlt } from 'react-icons/fa';
+"use client";
+import React, { JSX, useEffect, useState } from "react";
+import CreatableSelect from "react-select/creatable";
+import { StylesConfig, CSSObjectWithLabel } from "react-select";
+import { FaTrash, FaPencilAlt } from "react-icons/fa";
 
 /* --- Types --- */
 type OptionType = {
@@ -37,18 +37,64 @@ type OrderRow = {
 
 /* --- small helpers --- */
 function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === 'object' && v !== null;
+  return typeof v === "object" && v !== null;
 }
 function safeString(v: unknown): string {
-  if (v === null || v === undefined) return '';
+  if (v === null || v === undefined) return "";
   return String(v).trim();
 }
 function normKey(s: unknown) {
-  return String(s ?? '').trim().toLowerCase();
+  return String(s ?? "").trim().toLowerCase();
 }
 
-function makeTempId(prefix = '') {
+function makeTempId(prefix = "") {
   return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** Robust phone extractor: checks many common field names */
+function extractPhoneFromRecord(obj?: Record<string, unknown> | null): string {
+  if (!obj) return "";
+  const candidates = [
+    "number",
+    "Number",
+    "phone",
+    "Phone",
+    "contact",
+    "Contact",
+    "contact_number",
+    "Contact_Number",
+    "contactNumber",
+    "ContactNumber",
+    "mobile",
+    "Mobile",
+    "Agent_Phone",
+    "AgentPhone",
+    "agent_phone",
+    "agentPhone",
+    "Agent_Number",
+    "AgentNumber",
+    "agent_number",
+    "agentNumber",
+    "ContactNo",
+    "contact_no",
+    "Contact_No",
+  ];
+  for (const k of candidates) {
+    const v = obj[k as keyof typeof obj];
+    if (v !== undefined && v !== null) {
+      const s = safeString(v);
+      if (s) return s;
+    }
+  }
+  // last resort: try any key that looks like phone digits
+  for (const [, v] of Object.entries(obj)) {
+    if (v == null) continue;
+    const s = safeString(v);
+    if (!s) continue;
+    const digits = s.replace(/\D/g, "");
+    if (digits.length >= 6) return s;
+  }
+  return "";
 }
 
 /* -------------------------
@@ -77,76 +123,55 @@ export default function OrderForm({
 
   // step1
   const [selectedCustomer, setSelectedCustomer] = useState<OptionType | null>(null);
-  const [customerEmail, setCustomerEmail] = useState<string>('');
-  const [customerPhone, setCustomerPhone] = useState<string>('');
+  const [customerEmail, setCustomerEmail] = useState<string>("");
+  const [customerPhone, setCustomerPhone] = useState<string>("");
   const [selectedAgent, setSelectedAgent] = useState<OptionType | null>(null);
-  const [agentPhone, setAgentPhone] = useState<string>('');
+  const [agentPhone, setAgentPhone] = useState<string>("");
 
-  // confirmation toggle
-  const [isConfirmed, setIsConfirmed] = useState<boolean>(true);
+  // confirmation toggle — default OFF now
+  const [isConfirmed, setIsConfirmed] = useState<boolean>(false);
 
   // step2
   const [orderItems, setOrderItems] = useState<OrderRow[]>([]);
   const [currentItem, setCurrentItem] = useState<ItemType | null>(null);
   const [availableColors, setAvailableColors] = useState<string[]>([]);
   const [selectedColors, setSelectedColors] = useState<string[]>([]);
-  const [currentQty, setCurrentQty] = useState<string>('');
+  const [currentQty, setCurrentQty] = useState<string>("");
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
 
   // global
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const [error, setError] = useState<string>('');
-  const [itemError, setItemError] = useState<string>('');
-  const [step1Error, setStep1Error] = useState<string>('');
+  const [error, setError] = useState<string>("");
+  const [itemError, setItemError] = useState<string>("");
+  const [step1Error, setStep1Error] = useState<string>("");
 
   const customStyles: StylesConfig<OptionType | ItemType, false> = {
     control: (provided: CSSObjectWithLabel) => ({
       ...provided,
-      backgroundColor: '#1f2937',
-      borderColor: '#374151',
-      color: 'white',
-      minHeight: '42px',
+      backgroundColor: "#1f2937",
+      borderColor: "#374151",
+      color: "white",
+      minHeight: "42px",
     }),
-    singleValue: (provided: CSSObjectWithLabel) => ({ ...provided, color: 'white' }),
-    menu: (provided: CSSObjectWithLabel) => ({ ...provided, backgroundColor: '#1f2937' }),
-    option: (
-      provided: CSSObjectWithLabel,
-      state: { isSelected?: boolean; isFocused?: boolean }
-    ) => ({
+    singleValue: (provided: CSSObjectWithLabel) => ({ ...provided, color: "white" }),
+    menu: (provided: CSSObjectWithLabel) => ({ ...provided, backgroundColor: "#1f2937" }),
+    option: (provided: CSSObjectWithLabel, state: { isSelected?: boolean; isFocused?: boolean }) => ({
       ...provided,
-      backgroundColor: state.isSelected ? '#3b82f6' : state.isFocused ? '#374151' : '#1f2937',
-      color: 'white',
+      backgroundColor: state.isSelected ? "#3b82f6" : state.isFocused ? "#374151" : "#1f2937",
+      color: "white",
     }),
-    input: (provided: CSSObjectWithLabel) => ({ ...provided, color: 'white' }),
-    placeholder: (provided: CSSObjectWithLabel) => ({ ...provided, color: '#9ca3af' }),
+    input: (provided: CSSObjectWithLabel) => ({ ...provided, color: "white" }),
+    placeholder: (provided: CSSObjectWithLabel) => ({ ...provided, color: "#9ca3af" }),
   };
 
   /* -------------------------
      Helpers: normalize, merge, find
      ------------------------- */
-  function mergeOptions(primary: OptionType[], secondary: OptionType[]): OptionType[] {
-    const map = new Map<string, OptionType>();
-    const put = (o: OptionType) => {
-      const key = normKey(o.Company_Name ?? o.value ?? o.label);
-      if (!key) return;
-      const prev = map.get(key);
-      if (!prev) {
-        map.set(key, { ...o });
-      } else {
-        const entries = Object.entries(o).filter(([_, v]) => v !== undefined && v !== null && String(v).trim() !== '');
-        const merged = { ...prev, ...Object.fromEntries(entries) } as OptionType;
-        map.set(key, merged);
-      }
-    };
-    primary.forEach(put);
-    secondary.forEach(put);
-    return Array.from(map.values());
-  }
 
   function findExistingOption(list: OptionType[], name: string): OptionType | undefined {
     const key = normKey(name);
     return list.find((o) => {
-      const candidate = normKey(o.Company_Name ?? o.label ?? o.value);
+      const candidate = normKey(o.Company_Name ?? o.label ?? o.value ?? o.Agent_Name ?? o.Number ?? o.number ?? o.phone ?? "");
       return candidate === key;
     });
   }
@@ -158,27 +183,29 @@ export default function OrderForm({
     if (!res.ok) return [];
     const json = await res.json().catch(() => null);
     if (Array.isArray(json)) return json;
-    if (isObject(json) && Array.isArray((json as Record<string, unknown>).rows)) return (json as Record<string, unknown>).rows as unknown[];
-    if (isObject(json) && Array.isArray((json as Record<string, unknown>).orders)) return (json as Record<string, unknown>).orders as unknown[];
+    if (isObject(json) && Array.isArray((json as Record<string, unknown>).rows))
+      return (json as Record<string, unknown>).rows as unknown[];
+    if (isObject(json) && Array.isArray((json as Record<string, unknown>).orders))
+      return (json as Record<string, unknown>).orders as unknown[];
     // If the endpoint returns an object map, attempt to extract values
     if (isObject(json)) return Object.values(json);
     return [];
   };
 
   /* -------------------------
-     Fetch & merge BQ only (no /api/fs calls)
+     Fetch data (BQ / API)
      ------------------------- */
   useEffect(() => {
     async function fetchData(): Promise<void> {
       setLoadingCustomers(true);
       setLoadingAgents(true);
       setLoadingItems(true);
-      setError('');
+      setError("");
       try {
         const [customersRes, agentsRes, itemsRes] = await Promise.all([
-          fetch('/api/customers'),
-          fetch('/api/agents'),
-          fetch('/api/items'),
+          fetch("/api/customers"),
+          fetch("/api/agents"),
+          fetch("/api/items"),
         ]);
 
         const customersBQ = await normalizeListResponse(customersRes);
@@ -187,31 +214,55 @@ export default function OrderForm({
 
         const mapCustomer = (cRaw: unknown): OptionType => {
           const c = (cRaw ?? {}) as Record<string, unknown>;
-          const company = (c.Company_Name ?? c.company_name ?? c.label ?? '') as string;
-          const city = (c.City ?? '') as string;
+          // choose best available label fields for customers
+          const company =
+            safeString(c.Company_Name) ||
+            safeString(c.company_name) ||
+            safeString(c.Company) ||
+            safeString(c.name) ||
+            safeString(c.label) ||
+            safeString(c.value) ||
+            "";
+          const city = safeString(c.City || c.city || "");
+          const contactEmail = safeString(c.Email ?? c.email ?? "");
+          const contactNumber = extractPhoneFromRecord(c) || "";
           return {
             ...c,
-            value: (company || String(c.id ?? '')),
-            label: `${company || 'Unknown'}${city ? ` [${city}]` : ''}`,
-            Company_Name: company,
-            Email: (c.Email ?? c.email ?? '') as string,
-            Number: (c.Number ?? c.phone ?? '') as string,
-            Broker: (c.Broker ?? '') as string,
-            Agent_Name: (c.Agent_Name ?? '') as string,
+            value: company || String(c.id ?? ""),
+            label: `${company || "Unknown"}${city ? ` [${city}]` : ""}`,
+            Company_Name: company || undefined,
+            Email: contactEmail || undefined,
+            Number: contactNumber || undefined,
+            Broker: safeString(c.Broker ?? c.broker ?? ""),
+            Agent_Name: safeString(c.Agent_Name ?? c.agent_name ?? "") || undefined,
+            // pass-through possible agent_id fields
+            agent_id: c.agent_id ?? c.Agent_ID ?? c.agentId ?? undefined,
             id: (c.id ?? c._id ?? c.id) as string | number | undefined,
           } as OptionType;
         };
 
         const mapAgent = (aRaw: unknown): OptionType => {
           const a = (aRaw ?? {}) as Record<string, unknown>;
-          const name = (a.Company_Name ?? a.name ?? a.label ?? '') as string;
+          // pick the best name candidate among several possible fields
+          const nameCandidate =
+            safeString(a.Company_Name) ||
+            safeString(a.Agent_Name) ||
+            safeString(a.Agent) ||
+            safeString(a.name) ||
+            safeString(a.label) ||
+            safeString(a.value) ||
+            safeString(a.Email) ||
+            safeString(a.email) ||
+            "";
+          const phoneCandidate = extractPhoneFromRecord(a);
           return {
             ...a,
-            value: (name || String(a.id ?? '')),
-            label: name || String(a.id ?? ''),
-            Company_Name: name,
-            number: (a.Number ?? a.phone ?? a.Contact_Number ?? a.contact_number ?? '') as string,
-            id: (a.id ?? a._id ?? a.id) as string | number | undefined,
+            value: nameCandidate || String(a.id ?? ""),
+            label: nameCandidate || String(a.id ?? ""),
+            Company_Name: nameCandidate || undefined,
+            Agent_Name: safeString(a.Agent_Name ?? a.agent_name ?? "") || undefined,
+            number: phoneCandidate || undefined,
+            id: (a.id ?? a._id ?? a.agent_id ?? a.id) as string | number | undefined,
           } as OptionType;
         };
 
@@ -220,11 +271,11 @@ export default function OrderForm({
           let colors: string[] = [];
           if (Array.isArray(i.Colors)) colors = (i.Colors as unknown[]).map(String);
           else if (Array.isArray(i.colors)) colors = (i.colors as unknown[]).map(String);
-          else if (i.colors_string) colors = String(i.colors_string).split(',').map((s) => s.trim()).filter(Boolean);
+          else if (i.colors_string) colors = String(i.colors_string).split(",").map((s) => s.trim()).filter(Boolean);
           else if (i.Color) colors = [String(i.Color).trim()];
 
-          colors = Array.from(new Set(colors.map((c) => String(c || '').trim()).filter(Boolean)));
-          const label = (i.Item ?? i.sku ?? i.label ?? String(i.id ?? '')) as string;
+          colors = Array.from(new Set(colors.map((c) => String(c || "").trim()).filter(Boolean)));
+          const label = (i.Item ?? i.sku ?? i.label ?? String(i.id ?? "")) as string;
           return {
             ...i,
             value: label,
@@ -235,7 +286,6 @@ export default function OrderForm({
         };
 
         const mappedCustomersBQ: OptionType[] = (customersBQ as unknown[]).map(mapCustomer);
-        // no FS merge - keep only BQ results
         const mergedCustomers = mappedCustomersBQ;
 
         const mappedAgentsBQ: OptionType[] = (agentsBQ as unknown[]).map(mapAgent);
@@ -252,8 +302,8 @@ export default function OrderForm({
         setAgents(mergedAgents);
         setAvailableItems(mergedItems);
       } catch (errUnknown) {
-        console.error('fetchData error', errUnknown);
-        setError('Failed to load necessary data.');
+        console.error("fetchData error", errUnknown);
+        setError("Failed to load necessary data.");
       } finally {
         setLoadingCustomers(false);
         setLoadingAgents(false);
@@ -268,47 +318,108 @@ export default function OrderForm({
      Autofill agent when customer chosen
      ------------------------- */
   useEffect(() => {
+    // If no customer selected -> clear agent fields
     if (!selectedCustomer) {
       setSelectedAgent(null);
-      setAgentPhone('');
-      setCustomerEmail('');
-      setCustomerPhone('');
+      setAgentPhone("");
+      setCustomerEmail("");
+      setCustomerPhone("");
       return;
     }
 
+    // fill basic customer contact fields
     const sc = selectedCustomer as Record<string, unknown>;
-    setCustomerEmail(((sc.Email as string) ?? (sc.email as string) ?? '') as string);
-    setCustomerPhone(((sc.Number as string) ?? (sc.phone as string) ?? '') as string);
+    setCustomerEmail(safeString(sc.Email ?? sc.email ?? sc.contact_email ?? ""));
+    setCustomerPhone(extractPhoneFromRecord(sc) || "");
 
-    const brokerName = String(sc.Broker ?? sc.Agent_Name ?? sc.broker ?? '').trim();
-    if (brokerName) {
-      const found = agents.find((a) => {
-        const name = String(a.Company_Name ?? a.value ?? a.label ?? '').trim();
-        return name && name.toLowerCase() === brokerName.toLowerCase();
-      });
-      if (found) {
-        setSelectedAgent(found);
-        setAgentPhone(((found.number as string) ?? (found.phone as string) ?? (found.Contact_Number as string) ?? '') as string);
+    // Candidate names / ids that might point to agent
+    const candidateNames = [
+      safeString(sc.Broker ?? sc.broker ?? ""),
+      safeString(sc.Agent_Name ?? sc.agent_name ?? ""),
+      safeString(sc.Agent ?? sc.agent ?? ""),
+      safeString(sc.AgentName ?? sc.agentName ?? ""),
+      safeString(sc.AgentContact ?? sc.Agent_Contact ?? sc.agent_contact ?? ""),
+      safeString(sc.BrokerName ?? sc.broker_name ?? ""),
+    ].filter(Boolean);
+
+    // prefer explicit agent id fields if present
+    const agentIdCandidate = safeString(sc.agent_id ?? sc.Agent_ID ?? sc.agentId ?? sc.AgentId ?? sc.agent ?? "");
+    // also check nested agent object like sc.Agent?.name or sc.agent?.name
+    let nestedAgentName = "";
+    try {
+      const maybeAgent = (sc.Agent ?? sc.agent) as Record<string, unknown> | undefined;
+      if (isObject(maybeAgent)) nestedAgentName = safeString(maybeAgent.name ?? maybeAgent.Agent_Name ?? maybeAgent.Company_Name ?? "");
+    } catch {
+      nestedAgentName = "";
+    }
+    if (nestedAgentName) candidateNames.unshift(nestedAgentName);
+
+    // attempt match by id first (case-insensitive)
+    if (agentIdCandidate) {
+      const foundById = agents.find(
+        (a) =>
+          String(a.id ?? a.agent_id ?? a.value ?? "")
+            .toLowerCase()
+            .trim() === agentIdCandidate.toLowerCase().trim()
+      );
+      if (foundById) {
+        setSelectedAgent(foundById);
+        setAgentPhone(extractPhoneFromRecord(foundById as Record<string, unknown>) || "");
         return;
       }
     }
 
-    const agentById = agents.find(
-      (a) => String(a.id ?? a.agent_id ?? '').toLowerCase() === String((sc.agent_id ?? sc.Agent_ID ?? '') as string).toLowerCase()
-    );
-    if (agentById) {
-      setSelectedAgent(agentById);
-      setAgentPhone(((agentById.number as string) ?? (agentById.phone as string) ?? '') as string);
+    // attempt to match by any of candidateNames
+    for (const nm of candidateNames) {
+      if (!nm) continue;
+      const foundByName = agents.find((a) => {
+        const name = String(a.Company_Name ?? a.Agent_Name ?? a.label ?? a.value ?? "").trim();
+        return name && name.toLowerCase() === nm.toLowerCase();
+      });
+      if (foundByName) {
+        setSelectedAgent(foundByName);
+        setAgentPhone(extractPhoneFromRecord(foundByName as Record<string, unknown>) || "");
+        return;
+      }
+    }
+
+    // If customer has a candidate agent name but agents list doesn't contain it,
+    // create optimistic local agent entry and select it so the agent dropdown is filled.
+    const firstCandidate = candidateNames[0] || nestedAgentName || "";
+    if (firstCandidate) {
+      // check again if an agent with that key exists in a slightly different normalization
+      const existing = findExistingOption(agents, firstCandidate);
+      if (existing) {
+        setSelectedAgent(existing);
+        setAgentPhone(extractPhoneFromRecord(existing as Record<string, unknown>) || "");
+        return;
+      }
+      // create optimistic agent (local only)
+      const suggestedPhone =
+        extractPhoneFromRecord(sc) ||
+        safeString(sc.Agent_Phone ?? sc.AgentPhone ?? sc.agent_phone ?? sc.agentPhone ?? sc.contact_number ?? "");
+      const tempId = makeTempId("a_");
+      const optimisticAgent: OptionType = {
+        value: firstCandidate,
+        label: firstCandidate,
+        Company_Name: firstCandidate,
+        Agent_Name: firstCandidate,
+        number: suggestedPhone || undefined,
+        id: tempId,
+      };
+      setAgents((prev) => [optimisticAgent, ...prev]);
+      setSelectedAgent(optimisticAgent);
+      setAgentPhone(suggestedPhone);
       return;
     }
 
+    // fallback: leave agent empty
     setSelectedAgent(null);
-    setAgentPhone('');
+    setAgentPhone("");
   }, [selectedCustomer, agents]);
 
   /* -------------------------
-     Creatable handlers (NO /api/fs calls)
-     -- these now only do optimistic local updates with temporary ids
+     Creatable handlers (local optimistic)
      ------------------------- */
   async function handleCreateCustomer(input: string): Promise<void> {
     const name = input.trim();
@@ -316,17 +427,23 @@ export default function OrderForm({
     const existing = findExistingOption(customers, name);
     if (existing) {
       setSelectedCustomer(existing);
-      setCustomerEmail((existing.Email as string) ?? (existing.email as string) ?? '');
-      setCustomerPhone((existing.Number as string) ?? (existing.phone as string) ?? '');
+      setCustomerEmail(safeString(existing.Email ?? existing.email ?? ""));
+      setCustomerPhone(extractPhoneFromRecord(existing as Record<string, unknown>) || "");
       return;
     }
 
-    const tempId = makeTempId('c_');
-    const optimistic: OptionType = { value: name, label: name, Company_Name: name, Email: customerEmail, Number: customerPhone, id: tempId };
+    const tempId = makeTempId("c_");
+    const optimistic: OptionType = {
+      value: name,
+      label: name,
+      Company_Name: name,
+      Email: customerEmail || undefined,
+      Number: customerPhone || undefined,
+      id: tempId,
+    };
     setCustomers((prev) => [optimistic, ...prev]);
     setSelectedCustomer(optimistic);
-
-    // No server call to /api/fs/:collection — this is purely local/optimistic
+    // local-only
   }
 
   async function handleCreateAgent(input: string): Promise<void> {
@@ -335,16 +452,22 @@ export default function OrderForm({
     const existing = findExistingOption(agents, name);
     if (existing) {
       setSelectedAgent(existing);
-      setAgentPhone((existing.number as string) ?? (existing.phone as string) ?? '');
+      setAgentPhone(extractPhoneFromRecord(existing as Record<string, unknown>) || "");
       return;
     }
 
-    const tempId = makeTempId('a_');
-    const optimistic: OptionType = { value: name, label: name, Company_Name: name, number: agentPhone ?? '', id: tempId };
+    const tempId = makeTempId("a_");
+    const optimistic: OptionType = {
+      value: name,
+      label: name,
+      Company_Name: name,
+      Agent_Name: name,
+      number: agentPhone || undefined,
+      id: tempId,
+    };
     setAgents((prev) => [optimistic, ...prev]);
     setSelectedAgent(optimistic);
-
-    // No server call to /api/fs/:collection — local only
+    // local-only
   }
 
   async function handleCreateItem(input: string): Promise<void> {
@@ -358,25 +481,23 @@ export default function OrderForm({
       return;
     }
 
-    const tempId = makeTempId('i_');
+    const tempId = makeTempId("i_");
     const optimistic: ItemType = { value: name, label: name, colors: [], id: tempId };
     setAvailableItems((prev) => [optimistic, ...prev]);
     setCurrentItem(optimistic);
     setAvailableColors([]);
-
-    // No server call to /api/fs/:collection — local only
+    // local-only
   }
 
   /* --- helpers to merge order rows (avoid duplicates) --- */
   function addOrMergeRows(existing: OrderRow[], newRows: OrderRow[]): OrderRow[] {
-    // key: item.value + '||' + color
     const map = new Map<string, OrderRow>();
     for (const r of existing) {
-      const key = `${normKey(r.item?.value ?? r.item?.label ?? '')}||${normKey(r.color)}`;
+      const key = `${normKey(r.item?.value ?? r.item?.label ?? "")}||${normKey(r.color)}`;
       map.set(key, { ...r, quantity: Number(r.quantity) || 0 });
     }
     for (const r of newRows) {
-      const key = `${normKey(r.item?.value ?? r.item?.label ?? '')}||${normKey(r.color)}`;
+      const key = `${normKey(r.item?.value ?? r.item?.label ?? "")}||${normKey(r.color)}`;
       const existingRow = map.get(key);
       if (existingRow) {
         existingRow.quantity = Number(existingRow.quantity) + Number(r.quantity);
@@ -391,21 +512,21 @@ export default function OrderForm({
   /* --- handlers with typed params --- */
   const handleCustomerChange = (opt: OptionType | null): void => {
     setSelectedCustomer(opt);
-    setStep1Error('');
-    setError('');
+    setStep1Error("");
+    setError("");
   };
 
   const handleAgentChange = (opt: OptionType | null): void => {
     setSelectedAgent(opt);
-    setAgentPhone(((opt as Record<string, unknown>)?.number as string) ?? ((opt as Record<string, unknown>)?.phone as string) ?? '');
-    setStep1Error('');
+    setAgentPhone(extractPhoneFromRecord(opt as Record<string, unknown>) || "");
+    setStep1Error("");
   };
 
   const handleItemChange = (opt: ItemType | null): void => {
     setCurrentItem(opt);
     setSelectedColors([]);
-    setCurrentQty('');
-    setItemError('');
+    setCurrentQty("");
+    setItemError("");
     setEditingIndex(null);
 
     if (opt && Array.isArray(opt.colors) && opt.colors.length > 0) {
@@ -417,7 +538,7 @@ export default function OrderForm({
 
   const toggleColor = (color: string): void => {
     setSelectedColors((prev) => (prev.includes(color) ? prev.filter((c) => c !== color) : [...prev, color]));
-    setItemError('');
+    setItemError("");
   };
 
   const minColorsRequired = (): number => {
@@ -434,14 +555,14 @@ export default function OrderForm({
   };
 
   const handleAddOrUpdateItem = (): void => {
-    setItemError('');
+    setItemError("");
     if (!currentItem) {
-      setItemError('Please select an item.');
+      setItemError("Please select an item.");
       return;
     }
     const qty = Number(currentQty);
-    if (currentQty === '' || Number.isNaN(qty) || qty <= 0) {
-      setItemError('Quantity must be a number greater than 0.');
+    if (currentQty === "" || Number.isNaN(qty) || qty <= 0) {
+      setItemError("Quantity must be a number greater than 0.");
       return;
     }
 
@@ -449,7 +570,7 @@ export default function OrderForm({
     const selCount = selectedColors.length;
 
     if (minReq > 0 && selCount < minReq) {
-      setItemError(`Please select at least ${minReq} color${minReq > 1 ? 's' : ''} before adding.`);
+      setItemError(`Please select at least ${minReq} color${minReq > 1 ? "s" : ""} before adding.`);
       return;
     }
 
@@ -461,24 +582,22 @@ export default function OrderForm({
         quantity: qty,
       }));
     } else {
-      newEntries = [{ item: currentItem, color: '', quantity: qty }];
+      newEntries = [{ item: currentItem, color: "", quantity: qty }];
     }
 
     if (editingIndex !== null && editingIndex >= 0 && editingIndex < orderItems.length) {
-      // replace the single edited row with potentially multiple new rows
       const updated = [...orderItems];
       updated.splice(editingIndex, 1, ...newEntries);
-      setOrderItems(addOrMergeRows(updated, [])); // make sure merging duplicates after replace
+      setOrderItems(addOrMergeRows(updated, []));
       setEditingIndex(null);
     } else {
-      // append and merge duplicates
       setOrderItems((prev) => addOrMergeRows(prev, newEntries));
     }
 
     setCurrentItem(null);
     setAvailableColors([]);
     setSelectedColors([]);
-    setCurrentQty('');
+    setCurrentQty("");
   };
 
   const handleEditRow = (index: number): void => {
@@ -488,7 +607,7 @@ export default function OrderForm({
     setCurrentItem(row.item ?? null);
     setAvailableColors(row.item?.colors ? (row.item.colors as unknown[]).map(String) : []);
     setSelectedColors(row.color ? [row.color] : []);
-    setCurrentQty(String(row.quantity ?? ''));
+    setCurrentQty(String(row.quantity ?? ""));
     setStep(2);
   };
 
@@ -499,34 +618,34 @@ export default function OrderForm({
       setCurrentItem(null);
       setAvailableColors([]);
       setSelectedColors([]);
-      setCurrentQty('');
+      setCurrentQty("");
     }
   };
 
   const validateStep1 = (): boolean => {
     if (!selectedCustomer) {
-      setStep1Error('Please select a customer.');
+      setStep1Error("Please select a customer.");
       return false;
     }
     if (!selectedAgent) {
-      setStep1Error('Please select an agent.');
+      setStep1Error("Please select an agent.");
       return false;
     }
-    setStep1Error('');
+    setStep1Error("");
     return true;
   };
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>): Promise<void> => {
     e.preventDefault();
-    setError('');
+    setError("");
     if (!validateStep1()) return;
     if (orderItems.length === 0) {
-      setError('Add at least one item to the order.');
+      setError("Add at least one item to the order.");
       return;
     }
     for (const r of orderItems) {
       if (!r.quantity || Number.isNaN(Number(r.quantity)) || Number(r.quantity) <= 0) {
-        setError('All order items must have quantity > 0.');
+        setError("All order items must have quantity > 0.");
         return;
       }
     }
@@ -536,78 +655,80 @@ export default function OrderForm({
       const payload = {
         customer: {
           id: selectedCustomer?.id ?? selectedCustomer?.value ?? null,
-          name: selectedCustomer?.label ?? selectedCustomer?.value ?? '',
+          name: selectedCustomer?.label ?? selectedCustomer?.value ?? "",
           email: customerEmail,
           phone: customerPhone,
         },
         agent: {
           id: selectedAgent?.id ?? selectedAgent?.value ?? null,
-          name: selectedAgent?.label ?? selectedAgent?.value ?? '',
+          name: selectedAgent?.label ?? selectedAgent?.value ?? "",
           number: agentPhone,
         },
         items: orderItems.map((it) => ({
-          sku: it.item?.sku ?? it.item?.value ?? '',
-          itemName: it.item?.label ?? it.item?.Item ?? '',
+          sku: it.item?.sku ?? it.item?.value ?? "",
+          itemName: it.item?.label ?? it.item?.Item ?? "",
           color: it.color,
           quantity: Number(it.quantity),
         })),
-        orderStatus: isConfirmed ? 'Confirmed' : 'Unconfirmed',
+        orderStatus: isConfirmed ? "Confirmed" : "Unconfirmed",
       };
 
-      // If parent provided createOrder, use it. Otherwise, fall back to direct API call.
       let body: unknown = null;
-      if (typeof createOrder === 'function') {
+      if (typeof createOrder === "function") {
         body = await createOrder(payload);
       } else {
-        const res = await fetch('/api/orders', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+        const res = await fetch("/api/orders", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
         });
-        const ct = res.headers.get('content-type') ?? '';
-        body = ct.includes('application/json') ? (await res.json().catch(() => null)) : null;
+        const ct = res.headers.get("content-type") ?? "";
+        body = ct.includes("application/json") ? await res.json().catch(() => null) : null;
         if (!res.ok) {
-          const serverMsg = isObject(body) && typeof (body as Record<string, unknown>).message === 'string'
-            ? (body as Record<string, unknown>).message
-            : `HTTP ${res.status}`;
+          const serverMsg =
+            isObject(body) && typeof (body as Record<string, unknown>).message === "string"
+              ? (body as Record<string, unknown>).message
+              : `HTTP ${res.status}`;
           throw new Error(String(serverMsg));
         }
       }
 
-      // If server returned structured error details, show them safely
       if (isObject(body)) {
         if ((body as Record<string, unknown>).bigQueryError) {
           const maybeErr = (body as Record<string, unknown>).bigQueryError;
-          const details = typeof maybeErr === 'string' ? maybeErr : JSON.stringify(maybeErr, null, 2);
+          const details = typeof maybeErr === "string" ? maybeErr : JSON.stringify(maybeErr, null, 2);
           window.alert(`BigQuery INSERT FAILED — full error details:\n\n${details}`);
-          if (typeof refreshOrders === 'function') await refreshOrders();
-          if (typeof closeModal === 'function') closeModal();
+          if (typeof refreshOrders === "function") await refreshOrders();
+          if (typeof closeModal === "function") closeModal();
           return;
         }
 
-        // safe narrow for the detailed BigQuery object
         const bigQ = (body as Record<string, unknown>).bigQuery;
         if (isObject(bigQ)) {
           const bqRec = bigQ as Record<string, unknown>;
           const totalErrors = bqRec.totalErrors;
-          if (typeof totalErrors === 'number' && totalErrors > 0) {
+          if (typeof totalErrors === "number" && totalErrors > 0) {
             const summary = JSON.stringify(bqRec, null, 2);
             window.alert(`BigQuery reported ${totalErrors} row errors. Full summary:\n\n${summary}`);
-            if (typeof refreshOrders === 'function') await refreshOrders();
-            if (typeof closeModal === 'function') closeModal();
+            if (typeof refreshOrders === "function") await refreshOrders();
+            if (typeof closeModal === "function") closeModal();
             return;
           }
         }
       }
 
-      if (typeof refreshOrders === 'function') {
-        try { await refreshOrders(); } catch (e) { console.warn('refreshOrders failed after create:', e); }
+      if (typeof refreshOrders === "function") {
+        try {
+          await refreshOrders();
+        } catch (e) {
+          console.warn("refreshOrders failed after create:", e);
+        }
       }
-      if (typeof closeModal === 'function') closeModal();
+      if (typeof closeModal === "function") closeModal();
     } catch (errUnknown) {
-      console.error('submit error', errUnknown);
+      console.error("submit error", errUnknown);
       const msg = errUnknown instanceof Error ? errUnknown.message : String(errUnknown);
-      setError('An unexpected error occurred.');
+      setError("An unexpected error occurred.");
       window.alert(`Failed to create order — unexpected error:\n\n${msg}`);
     } finally {
       setIsSubmitting(false);
@@ -626,7 +747,7 @@ export default function OrderForm({
 
       {step === 1 ? (
         <div>
-          {/* Step 1 UI (unchanged) */}
+          {/* Step 1 UI */}
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Customer</label>
             <CreatableSelect<OptionType, false>
@@ -634,12 +755,16 @@ export default function OrderForm({
               options={customers}
               value={selectedCustomer}
               onChange={(opt) => handleCustomerChange(opt as OptionType | null)}
-              onCreateOption={(input) => { void handleCreateCustomer(input); }}
+              onCreateOption={(input) => {
+                void handleCreateCustomer(input);
+              }}
               isClearable
               isSearchable
               isLoading={loadingCustomers}
               isDisabled={loadingCustomers}
-              placeholder={loadingCustomers ? 'Loading customers...' : 'Select or type to add customer...'}
+              placeholder={loadingCustomers ? "Loading customers..." : "Select or type to add customer..."}
+              getOptionLabel={(o: OptionType) => safeString(o.Company_Name ?? o.label ?? o.value ?? o.Agent_Name ?? "")}
+              getOptionValue={(o: OptionType) => String(o.id ?? o.value ?? o.label ?? "")}
             />
           </div>
 
@@ -661,12 +786,18 @@ export default function OrderForm({
               options={agents}
               value={selectedAgent}
               onChange={(opt) => handleAgentChange(opt as OptionType | null)}
-              onCreateOption={(input) => { void handleCreateAgent(input); }}
+              onCreateOption={(input) => {
+                void handleCreateAgent(input);
+              }}
               isClearable
               isSearchable
               isLoading={loadingAgents}
               isDisabled={loadingAgents}
-              placeholder={loadingAgents ? 'Loading agents...' : 'Select or type to add agent...'}
+              placeholder={loadingAgents ? "Loading agents..." : "Select or type to add agent..."}
+              getOptionLabel={(o: OptionType) =>
+                safeString(o.Company_Name ?? o.Agent_Name ?? o.label ?? o.value ?? o.email ?? o.Email ?? "")
+              }
+              getOptionValue={(o: OptionType) => String(o.id ?? o.value ?? o.label ?? "")}
             />
           </div>
 
@@ -683,7 +814,7 @@ export default function OrderForm({
               onClick={() => {
                 if (validateStep1()) {
                   setStep(2);
-                  setError('');
+                  setError("");
                 }
               }}
               className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md"
@@ -694,7 +825,7 @@ export default function OrderForm({
         </div>
       ) : (
         <div>
-          {/* Step 2 UI (unchanged) */}
+          {/* Step 2 UI */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">Item</label>
@@ -703,25 +834,22 @@ export default function OrderForm({
                 options={availableItems}
                 value={currentItem}
                 onChange={(opt) => handleItemChange(opt as ItemType | null)}
-                onCreateOption={(input) => { void handleCreateItem(input); }}
-                placeholder={loadingItems ? 'Loading items...' : 'Select item...'}
+                onCreateOption={(input) => {
+                  void handleCreateItem(input);
+                }}
+                placeholder={loadingItems ? "Loading items..." : "Select item..."}
                 isClearable
                 isSearchable
                 isLoading={loadingItems}
                 isDisabled={loadingItems}
+                getOptionLabel={(o: ItemType) => safeString(o.label ?? o.value ?? "")}
+                getOptionValue={(o: ItemType) => String(o.id ?? o.value ?? o.label ?? "")}
               />
             </div>
 
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">Quantity (in sets)</label>
-              <input
-                type="number"
-                min="1"
-                value={currentQty}
-                onChange={(e) => setCurrentQty(e.target.value)}
-                placeholder=""
-                className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3"
-              />
+              <input type="number" min="1" value={currentQty} onChange={(e) => setCurrentQty(e.target.value)} placeholder="" className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3" />
             </div>
           </div>
 
@@ -735,12 +863,7 @@ export default function OrderForm({
                 availableColors.map((c) => {
                   const selected = selectedColors.includes(c);
                   return (
-                    <button
-                      key={c}
-                      type="button"
-                      onClick={() => toggleColor(c)}
-                      className={`px-3 py-1 rounded-full text-sm font-semibold focus:outline-none transition ${selected ? 'bg-blue-600 text-white' : 'bg-gray-700 text-gray-200 hover:bg-gray-600'}`}
-                    >
+                    <button key={c} type="button" onClick={() => toggleColor(c)} className={`px-3 py-1 rounded-full text-sm font-semibold focus:outline-none transition ${selected ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-200 hover:bg-gray-600"}`}>
                       {c}
                     </button>
                   );
@@ -750,11 +873,7 @@ export default function OrderForm({
 
             <div className="mt-2 text-xs text-gray-400">
               <span>
-                {availableColors.length >= 3
-                  ? 'Minimum 3 colors required.'
-                  : availableColors.length >= 1
-                    ? 'Select at least 1 color.'
-                    : 'No colors available — you may add the item without selecting colors.'}
+                {availableColors.length >= 3 ? "Minimum 3 colors required." : availableColors.length >= 1 ? "Select at least 1 color." : "No colors available — you may add the item without selecting colors."}
               </span>
             </div>
 
@@ -762,15 +881,8 @@ export default function OrderForm({
           </div>
 
           <div className="flex justify-end mb-4 gap-3">
-            <button
-              type="button"
-              onClick={() => {
-                handleAddOrUpdateItem();
-              }}
-              disabled={!canAddOrUpdate()}
-              className={`bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md disabled:opacity-50 disabled:cursor-not-allowed`}
-            >
-              {editingIndex !== null ? 'Update Item' : 'Add Item'}
+            <button type="button" onClick={() => { handleAddOrUpdateItem(); }} disabled={!canAddOrUpdate()} className={`bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md disabled:opacity-50 disabled:cursor-not-allowed`}>
+              {editingIndex !== null ? "Update Item" : "Add Item"}
             </button>
           </div>
 
@@ -790,30 +902,14 @@ export default function OrderForm({
                 {orderItems.map((it, idx) => (
                   <tr key={idx} className="bg-gray-800">
                     <td className="px-4 py-3 text-sm text-gray-100">{it.item?.label ?? it.item?.Item ?? it.item?.value}</td>
-                    <td className="px-4 py-3 text-sm text-gray-200">{it.color || '—'}</td>
+                    <td className="px-4 py-3 text-sm text-gray-200">{it.color || "—"}</td>
                     <td className="px-4 py-3 text-sm text-gray-200 text-right">{it.quantity}</td>
                     <td className="px-4 py-3 text-sm text-gray-200 text-center">
                       <div className="inline-flex items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleEditRow(idx);
-                          }}
-                          title="Edit"
-                          className="p-2 rounded hover:bg-gray-700"
-                        >
+                        <button type="button" onClick={(e) => { e.stopPropagation(); handleEditRow(idx); }} title="Edit" className="p-2 rounded hover:bg-gray-700">
                           <FaPencilAlt className="text-yellow-400" />
                         </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            handleDeleteRow(idx);
-                          }}
-                          title="Delete"
-                          className="p-2 rounded hover:bg-gray-700"
-                        >
+                        <button type="button" onClick={(e) => { e.stopPropagation(); handleDeleteRow(idx); }} title="Delete" className="p-2 rounded hover:bg-gray-700">
                           <FaTrash className="text-red-400" />
                         </button>
                       </div>
@@ -831,24 +927,16 @@ export default function OrderForm({
             </table>
           </div>
 
-          {/* Status + Submit (unchanged) */}
+          {/* Status + Submit */}
           <div className="mb-4 flex items-center justify-between">
             <div className="flex items-center gap-4">
               <div>
                 <div className="text-sm text-gray-300 font-medium">Order Status</div>
-                <div className="text-xs text-gray-400">{isConfirmed ? 'Confirmed' : 'Unconfirmed'}</div>
+                <div className="text-xs text-gray-400">{isConfirmed ? "Confirmed" : "Unconfirmed"}</div>
               </div>
 
-              <button
-                type="button"
-                role="switch"
-                aria-checked={isConfirmed}
-                onClick={() => setIsConfirmed((s) => !s)}
-                className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors focus:outline-none ${isConfirmed ? 'bg-green-500' : 'bg-gray-600'}`}
-              >
-                <span
-                  className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${isConfirmed ? 'translate-x-7' : 'translate-x-1'}`}
-                />
+              <button type="button" role="switch" aria-checked={isConfirmed} onClick={() => setIsConfirmed((s) => !s)} className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors focus:outline-none ${isConfirmed ? "bg-green-500" : "bg-gray-600"}`}>
+                <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${isConfirmed ? "translate-x-7" : "translate-x-1"}`} />
               </button>
             </div>
 
@@ -860,18 +948,14 @@ export default function OrderForm({
               Back
             </button>
 
-            <button
-              type="submit"
-              disabled={isSubmitting || orderItems.length === 0}
-              className={`flex items-center gap-2 ${isSubmitting ? 'bg-blue-700' : 'bg-blue-600 hover:bg-blue-700'} text-white font-bold py-2 px-4 rounded-md disabled:opacity-60`}
-            >
+            <button type="submit" disabled={isSubmitting || orderItems.length === 0} className={`flex items-center gap-2 ${isSubmitting ? "bg-blue-700" : "bg-blue-600 hover:bg-blue-700"} text-white font-bold py-2 px-4 rounded-md disabled:opacity-60`}>
               {isSubmitting ? (
                 <svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24" aria-hidden>
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" />
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
                 </svg>
               ) : null}
-              <span>{isSubmitting ? '' : 'Create Order'}</span>
+              <span>{isSubmitting ? "" : "Create Order"}</span>
             </button>
           </div>
         </div>

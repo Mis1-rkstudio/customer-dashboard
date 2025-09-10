@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useState } from "react";
 import Image from "next/image";
 import { Trash2, Plus, Minus } from "lucide-react";
 import { useCart, CartItem } from "@/context/CartContext";
@@ -171,6 +171,7 @@ export default function CartPage(): React.ReactElement {
   const [showShareModal, setShowShareModal] = useState<boolean>(false);
   const [placedOrderForShare, setPlacedOrderForShare] =
     useState<ShareOrderShape | null>(null);
+  const [confirmedOrder, setConfirmedOrder] = useState<boolean>(false);
 
   const itemCount: number = Array.isArray(cartItems) ? cartItems.length : 0;
 
@@ -260,10 +261,6 @@ export default function CartPage(): React.ReactElement {
   const dec = (it: CartItem): void => {
     const sizesMap = getSizesMapFromItem(it);
     if (Object.keys(sizesMap).length > 0) {
-      const sumCurrent = Object.values(sizesMap).reduce(
-        (a, b) => a + (safeNumber(b) || 0),
-        0
-      );
       const newSizes: Record<string, number> = {};
       for (const k of Object.keys(sizesMap))
         newSizes[k] = Math.max(0, (safeNumber(sizesMap[k]) || 0) - 1);
@@ -669,6 +666,7 @@ export default function CartPage(): React.ReactElement {
         meta: {
           source: "web-cart",
           createdBy: (user?.id as string | undefined) ?? null,
+          confirmed: confirmedOrder,
         },
       };
 
@@ -740,6 +738,32 @@ export default function CartPage(): React.ReactElement {
             {itemCount} items · {totalSets} total sets
           </p>
         </header>
+
+        {/* Confirmed order toggle (iPhone-style) */}
+        {/* Confirmed order checkbox */}
+        <div className="mb-6 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <label className="inline-flex items-center gap-3 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={confirmedOrder}
+                onChange={(e) => setConfirmedOrder(e.target.checked)}
+                aria-label="Confirmed order"
+                className="h-5 w-5 rounded border border-[#12303a] bg-[#07151a] text-blue-600 focus:ring-blue-400"
+              />
+              <span className="ml-2 text-sm text-slate-300 font-medium">
+                Confirmed order
+              </span>
+            </label>
+
+            <div className="text-sm text-slate-400">
+              Toggle when you&#39;ve reviewed and confirmed this order.
+            </div>
+          </div>
+
+          {/* keep the right-side controls area empty so layout matches */}
+          <div />
+        </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-6">

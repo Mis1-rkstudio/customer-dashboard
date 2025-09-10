@@ -22,6 +22,9 @@ export interface ItemRow {
   Fabric?: Nil<string>;
   FileId?: Nil<string>;
   Thumbnail_URL?: Nil<string>;
+
+  // new: wholesale price
+  WSP?: Nil<number>;
 }
 
 interface ApiSuccess {
@@ -57,8 +60,8 @@ export async function GET() {
       );
     }
 
-    // fully-qualified table names
-    const stockTable = `\`${project}.${dataset}.kolkata_stock\``;
+    // point at stock_combined
+    const stockTable = `\`${project}.frono.stock_combined\``;
     const detailsTable = `\`${project}.frono.Sample_details\``;
     const reservationsTable = `\`${project}.${dataset}.orders_reservations\``;
 
@@ -67,12 +70,18 @@ export async function GET() {
       WITH grouped AS (
         SELECT
           Item,
-          ARRAY_AGG(TRIM(Color) IGNORE NULLS) AS color_arr,
-          ARRAY_AGG(TRIM(Size) IGNORE NULLS) AS size_arr,
+          -- cast to STRING before TRIM to avoid TRIM(FLOAT64) errors
+          ARRAY_AGG(TRIM(CAST(Color AS STRING)) IGNORE NULLS) AS color_arr,
+          ARRAY_AGG(TRIM(CAST(Size AS STRING)) IGNORE NULLS) AS size_arr,
+
           SUM(COALESCE(SAFE_CAST(Opening_Stock AS INT64), 0)) AS Opening_Stock,
           SUM(COALESCE(SAFE_CAST(Stock_In AS INT64), 0)) AS Stock_In,
           SUM(COALESCE(SAFE_CAST(Stock_Out AS INT64), 0)) AS Stock_Out,
-          SUM(COALESCE(SAFE_CAST(Closing_Stock AS INT64), 0)) AS Closing_Stock
+          SUM(COALESCE(SAFE_CAST(Closing_Stock AS INT64), 0)) AS Closing_Stock,
+
+          -- capture WSP (wholesale price). ANY_VALUE picks one if multiple rows;
+          -- use MAX/MIN/AVG instead if you prefer deterministic aggregation.
+          ANY_VALUE(CAST(WSP AS FLOAT64)) AS WSP
         FROM ${stockTable}
         GROUP BY Item
       ),
@@ -107,22 +116,24 @@ export async function GET() {
         g.Stock_Out,
         g.Closing_Stock,
 
-        -- reservation-aware numbers (previous behavior you requested):
+        -- reservation-aware numbers
         IFNULL(r.reserved_total, 0) AS Reserved,
         GREATEST(g.Closing_Stock - IFNULL(r.reserved_total, 0), 0) AS Available,
 
+        -- details join (files / metadata)
         REPLACE(ANY_VALUE(s.File_URL), '/view?usp=drivesdk', '') AS File_URL,
-
         ANY_VALUE(s.Product_Code) AS Product_Code,
         ANY_VALUE(s.Concept_2) AS Concept,
         ANY_VALUE(s.Concept_3) AS Fabric,
 
         REGEXP_EXTRACT(REPLACE(ANY_VALUE(s.File_URL), '/view?usp=drivesdk', ''), r'/d/([^/]+)') AS FileId,
-
         IFNULL(
           CONCAT('https://drive.google.com/thumbnail?id=', REGEXP_EXTRACT(REPLACE(ANY_VALUE(s.File_URL), '/view?usp=drivesdk', ''), r'/d/([^/]+)')),
           NULL
-        ) AS Thumbnail_URL
+        ) AS Thumbnail_URL,
+
+        -- return WSP from grouped
+        g.WSP AS WSP
 
       FROM grouped g
       LEFT JOIN ${detailsTable} s
@@ -137,7 +148,8 @@ export async function GET() {
         g.Closing_Stock,
         g.color_arr,
         g.size_arr,
-        r.reserved_total
+        r.reserved_total,
+        g.WSP
       ORDER BY g.Item
     `;
 
