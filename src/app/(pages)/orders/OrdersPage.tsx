@@ -14,6 +14,7 @@ import OrderCard, {
 } from "@/components/OrderCard";
 import { useUser } from "@clerk/nextjs";
 import { useQueryState } from "nuqs"; // nuqs hook to persist query params
+import { useUserStore } from "@/store/useUserStore";
 
 /* ---------------------- small helpers ---------------------- */
 
@@ -298,6 +299,16 @@ export default function OrdersPage(): JSX.Element {
     typedUser?.emailAddresses?.[0]?.emailAddress ??
     undefined;
 
+  // read active user selection from global store
+  const currentUserId = useUserStore((s) => s.currentUserId);
+  const currentUserEmail = useUserStore((s) => s.currentUserEmail);
+
+  // isAdmin flag used to show/hide the Create button/modal and some admin logic
+  const isAdmin = Boolean(
+    typedUser?.publicMetadata &&
+      String(typedUser.publicMetadata.role ?? "").toLowerCase() === "admin"
+  );
+
   const [orders, setOrders] = useState<NormalizedOrder[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
@@ -305,10 +316,6 @@ export default function OrdersPage(): JSX.Element {
   const [searchQuery, setSearchQuery] = useState<string>("");
 
   // Use nuqs to persist query params:
-  // - q : searchQuery (string | null)
-  // - pills : JSON string of search pills (we store as JSON string)
-  // - tab : active tab ("all"|"active"|"cancelled")
-  // NOTE: nuqs' useQueryState overloads are strict; call it and assert the tuple type
   const [qParam, setQParam] = useQueryState("q") as [
     string | null,
     (v: string | null) => void
@@ -427,12 +434,25 @@ export default function OrdersPage(): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchQuery]);
 
-  /* ---------------------- fetchOrders and filter logic ---------------------- */
+  /* ---------------------- fetchOrders and filter logic (uses store current user) ---------------------- */
 
   const fetchOrders = useCallback(async (): Promise<void> => {
     setIsLoading(true);
     setFetchError("");
     try {
+      const isAdmin = Boolean(
+        typedUser?.publicMetadata &&
+          String(typedUser.publicMetadata.role ?? "").toLowerCase() === "admin"
+      );
+
+      // non-admin must have an active user selected in the store
+      if (!isAdmin && !currentUserId && !currentUserEmail) {
+        setOrders([]);
+        setIsLoading(false);
+        return;
+      }
+
+      // fetch all orders from server (server-side filtering could be added later)
       const res = await fetch("/api/orders");
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
@@ -440,6 +460,7 @@ export default function OrdersPage(): JSX.Element {
       }
       const data = await res.json().catch(() => null);
 
+      // normalize server shapes into an array
       let rawList: unknown[] = [];
       if (Array.isArray(data)) rawList = data;
       else if (
@@ -454,6 +475,12 @@ export default function OrdersPage(): JSX.Element {
         Array.isArray((data as Record<string, unknown>).orders)
       )
         rawList = (data as Record<string, unknown>).orders as unknown[];
+      else if (
+        data &&
+        typeof data === "object" &&
+        Array.isArray((data as Record<string, unknown>).data)
+      )
+        rawList = (data as Record<string, unknown>).data as unknown[];
       else rawList = [];
 
       const normalized = rawList.map((rRaw) => {
@@ -461,34 +488,40 @@ export default function OrdersPage(): JSX.Element {
           rRaw && typeof rRaw === "object"
             ? (rRaw as Record<string, unknown>)
             : {};
-
         const baseFrom = isObject(rec.payload)
           ? (rec.payload as Record<string, unknown>)
           : rec;
         const base = normalizeOrderShape(baseFrom);
 
-        if (!base.id && rec.id) base.id = String(rec.id);
+        if (!base.id && rec && (rec as Record<string, unknown>).id)
+          base.id = String((rec as Record<string, unknown>).id);
 
-        if (rec.orderStatus !== undefined && rec.orderStatus !== null) {
-          base.orderStatus = String(rec.orderStatus);
-        }
+        if (rec && (rec as Record<string, unknown>).orderStatus !== undefined)
+          base.orderStatus = String(
+            (rec as Record<string, unknown>).orderStatus
+          );
 
-        if (rec.cancelledBy !== undefined) {
+        if (rec && (rec as Record<string, unknown>).cancelledBy !== undefined)
           base.cancelledBy =
-            rec.cancelledBy === null ? null : String(rec.cancelledBy);
-        }
+            (rec as Record<string, unknown>).cancelledBy === null
+              ? null
+              : String((rec as Record<string, unknown>).cancelledBy);
 
-        if (rec.cancelledAt !== undefined && rec.cancelledAt !== null) {
-          const ca = rec.cancelledAt;
-          if (isObject(ca) && "value" in ca) {
+        if (
+          rec &&
+          (rec as Record<string, unknown>).cancelledAt !== undefined &&
+          (rec as Record<string, unknown>).cancelledAt !== null
+        ) {
+          const ca = (rec as Record<string, unknown>).cancelledAt;
+          if (isObject(ca) && "value" in ca)
             base.cancelledAt = String((ca as Record<string, unknown>).value);
-          } else {
-            base.cancelledAt = String(ca);
-          }
+          else base.cancelledAt = String(ca);
         }
 
-        if (Array.isArray(rec.statusHistory)) {
-          base.statusHistory = (rec.statusHistory as unknown[])
+        if (Array.isArray((rec as Record<string, unknown>).statusHistory)) {
+          base.statusHistory = (
+            (rec as Record<string, unknown>).statusHistory as unknown[]
+          )
             .map((s) => {
               if (!isObject(s)) return null;
               return {
@@ -513,33 +546,124 @@ export default function OrdersPage(): JSX.Element {
         }
 
         base.raw = rec;
-
         return base;
       });
 
-      // --- detect admin role ---
-      const isAdmin = Boolean(
-        typedUser?.publicMetadata &&
-          String(typedUser.publicMetadata.role ?? "") === "admin"
-      );
+      // helper: robustly extract order_placed_by (many possible shapes)
+      const extractOrderPlacedBy = (raw?: unknown): string => {
+        if (!raw || typeof raw !== "object") return "";
+        const rec = raw as Record<string, unknown>;
 
-      // best-effort email and phone of signed-in user
-      const currentUserEmail =
-        typedUser?.primaryEmailAddress?.emailAddress ??
-        typedUser?.emailAddresses?.[0]?.emailAddress ??
-        primaryEmailAddress ??
-        undefined;
+        const candidates: unknown[] = [
+          rec.order_placed_by,
+          rec.orderPlacedBy,
+          rec.orderPlaced_by,
+          rec.order_placedBy,
+          rec.orderPlaced_By,
+          rec.orderPlacedBY,
+          rec.orderPlacedByEmail,
+          rec.order_placed_by_email,
+          rec.orderPlacedBy_Email,
+          // if payload exists, prefer payload.order_placed_by or payload.orderPlacedBy
+          (rec.payload &&
+            (rec.payload as Record<string, unknown>).order_placed_by) ??
+            undefined,
+          (rec.payload &&
+            (rec.payload as Record<string, unknown>).orderPlacedBy) ??
+            undefined,
+        ];
 
-      const currentUserPhone =
-        typedUser?.primaryPhoneNumber?.phoneNumber ??
-        typedUser?.phoneNumbers?.[0]?.phoneNumber ??
-        undefined;
+        for (const c of candidates) {
+          if (c !== undefined && c !== null) {
+            const s = String(c).trim();
+            if (s) return s.toLowerCase();
+          }
+        }
 
-      function onlyDigits(s?: unknown): string {
-        return String(s ?? "").replace(/\D/g, "");
+        // last resort: look inside payload JSON string if present
+        if (typeof rec.payload === "string" && rec.payload) {
+          try {
+            const p = JSON.parse(rec.payload);
+            if (p && typeof p === "object") {
+              const pv =
+                (p as Record<string, unknown>).order_placed_by ??
+                (p as Record<string, unknown>).orderPlacedBy;
+              if (pv) return String(pv).trim().toLowerCase();
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        return "";
+      };
+
+      const adminEmail = String(primaryEmailAddress ?? "")
+        .trim()
+        .toLowerCase();
+      const selectedEmail = String(currentUserEmail ?? "")
+        .trim()
+        .toLowerCase();
+
+      // If logged-in user is admin -> apply admin rules you specified
+      if (isAdmin) {
+        // must have admin email
+        if (!adminEmail) {
+          setOrders([]);
+          setIsLoading(false);
+          return;
+        }
+
+        // if store user is empty OR equals admin -> show orders placed by admin
+        if (!selectedEmail || selectedEmail === adminEmail) {
+          const filtered = normalized.filter((o) => {
+            const placedBy = extractOrderPlacedBy(o.raw ?? o) || "";
+            return placedBy === adminEmail;
+          });
+          setOrders(filtered);
+          setIsLoading(false);
+          return;
+        }
+
+        // admin selected a different user: show orders placed by admin for that customer
+        const filtered = normalized.filter((o) => {
+          const placedBy = extractOrderPlacedBy(o.raw ?? o) || "";
+          const custEmail = String(o.customerEmail ?? "")
+            .trim()
+            .toLowerCase();
+          return placedBy === adminEmail && custEmail === selectedEmail;
+        });
+
+        setOrders(filtered);
+        setIsLoading(false);
+        return;
       }
 
-      function extractPossibleEmailsFromRaw(raw?: unknown): string[] {
+      // Non-admin behavior:
+      // If the store email equals logged-in email -> only show orders where order_placed_by == logged-in email
+      if (
+        currentUserEmail &&
+        primaryEmailAddress &&
+        currentUserEmail.trim().toLowerCase() ===
+          String(primaryEmailAddress).trim().toLowerCase()
+      ) {
+        const needle = String(primaryEmailAddress).trim().toLowerCase();
+        const filtered = normalized.filter((o) => {
+          const placedBy = extractOrderPlacedBy(o.raw ?? o) || "";
+          return placedBy === needle;
+        });
+        setOrders(filtered);
+        setIsLoading(false);
+        return;
+      }
+
+      // Otherwise fall back to previous strict filtering by selected user's email/id/phone
+      const needleEmail = (currentUserEmail ?? "").trim().toLowerCase();
+      const needleUserId = currentUserId ?? "";
+
+      const onlyDigits = (s?: unknown) => String(s ?? "").replace(/\D/g, "");
+
+      const extractPossibleEmailsFromRaw = (raw?: unknown): string[] => {
         if (!raw || typeof raw !== "object") return [];
         const rec = raw as Record<string, unknown>;
         const candidates = [
@@ -553,9 +677,9 @@ export default function OrdersPage(): JSX.Element {
           .filter(Boolean)
           .map((c) => String(c).trim().toLowerCase())
           .filter(Boolean);
-      }
+      };
 
-      function extractPossiblePhonesFromRaw(raw?: unknown): string[] {
+      const extractPossiblePhonesFromRaw = (raw?: unknown): string[] => {
         if (!raw || typeof raw !== "object") return [];
         const rec = raw as Record<string, unknown>;
         const candidates = [
@@ -569,45 +693,58 @@ export default function OrdersPage(): JSX.Element {
           (rec.agent && (rec.agent as Record<string, unknown>).number) ??
             undefined,
         ];
-        return candidates
-          .filter(Boolean)
-          .map((p) => onlyDigits(p))
-          .filter(Boolean);
-      }
+        return candidates.map((p) => onlyDigits(p)).filter(Boolean);
+      };
 
-      let filteredNormalized: typeof normalized = [];
+      const matchesUserIdInRaw = (raw?: unknown, id?: string): boolean => {
+        if (!id || !raw || typeof raw !== "object") return false;
+        const rec = raw as Record<string, unknown>;
+        const candidates = [
+          rec.userId,
+          rec.user_id,
+          rec.customerId,
+          rec.customer_id,
+          rec.agentId,
+          rec.agent_id,
+          rec.ownerId,
+          rec.owner_id,
+          rec.createdBy,
+          rec.created_by,
+          rec.row_id,
+        ];
+        return candidates.some((c) => c !== undefined && String(c) === id);
+      };
 
-      if (isAdmin) {
-        // Admin sees everything
-        filteredNormalized = normalized;
-      } else if (currentUserEmail && String(currentUserEmail).trim() !== "") {
-        const needle = String(currentUserEmail).trim().toLowerCase();
-        const needleDigits = onlyDigits(currentUserPhone);
-
-        filteredNormalized = normalized.filter((o) => {
-          if (o.customerEmail && String(o.customerEmail).trim() !== "") {
-            if (String(o.customerEmail).trim().toLowerCase() === needle)
-              return true;
-          }
-
+      const filtered = normalized.filter((o) => {
+        // match by email if we have one
+        if (needleEmail) {
+          if (
+            o.customerEmail &&
+            String(o.customerEmail).trim().toLowerCase() === needleEmail
+          )
+            return true;
           const rawEmails = extractPossibleEmailsFromRaw(o.raw);
-          if (rawEmails.some((e) => e === needle)) return true;
+          if (rawEmails.some((e) => e === needleEmail)) return true;
+        }
 
-          if (needleDigits) {
-            const orderPhones: string[] = [];
-            if (o.customerPhone) orderPhones.push(onlyDigits(o.customerPhone));
-            orderPhones.push(...extractPossiblePhonesFromRaw(o.raw));
-            if (orderPhones.some((p) => p === needleDigits)) return true;
-          }
+        // match by user id if we have one (strongest)
+        if (needleUserId && matchesUserIdInRaw(o.raw, needleUserId))
+          return true;
 
-          return false;
-        });
-      } else {
-        // No signed-in email available and not admin -> show nothing
-        filteredNormalized = [];
-      }
+        // match phone (fallback)
+        const needlePhone = "";
+        if (needlePhone) {
+          const orderPhones: string[] = [];
+          if (o.customerPhone) orderPhones.push(onlyDigits(o.customerPhone));
+          orderPhones.push(...extractPossiblePhonesFromRaw(o.raw));
+          if (orderPhones.some((p) => p === onlyDigits(needlePhone)))
+            return true;
+        }
 
-      setOrders(filteredNormalized);
+        return false;
+      });
+
+      setOrders(filtered);
     } catch (err: unknown) {
       console.error("Failed to fetch orders:", err);
       setFetchError("Failed to fetch orders. See console for details.");
@@ -615,7 +752,7 @@ export default function OrdersPage(): JSX.Element {
     } finally {
       setIsLoading(false);
     }
-  }, [typedUser, primaryEmailAddress]);
+  }, [typedUser, currentUserId, currentUserEmail, primaryEmailAddress]);
 
   useEffect(() => {
     void fetchOrders();
@@ -763,15 +900,18 @@ export default function OrdersPage(): JSX.Element {
           <p className="text-sm text-gray-400 mt-1">Manage and view orders</p>
         </div>
 
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => setICreateModalOpen(true)}
-            className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
-            type="button"
-          >
-            Create New Order
-          </button>
-        </div>
+        {/* Only show Create button to admins */}
+        {isAdmin && (
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() => setICreateModalOpen(true)}
+              className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded focus:outline-none focus:shadow-outline"
+              type="button"
+            >
+              Create New Order
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="mb-4">
@@ -987,15 +1127,18 @@ export default function OrdersPage(): JSX.Element {
         )}
       </Modal>
 
-      <Modal
-        isOpen={isCreateModalOpen}
-        onClose={() => setICreateModalOpen(false)}
-      >
-        <OrderForm
-          closeModal={() => setICreateModalOpen(false)}
-          refreshOrders={fetchOrders}
-        />
-      </Modal>
+      {/* Only render create-order modal for admins */}
+      {isAdmin && (
+        <Modal
+          isOpen={isCreateModalOpen}
+          onClose={() => setICreateModalOpen(false)}
+        >
+          <OrderForm
+            closeModal={() => setICreateModalOpen(false)}
+            refreshOrders={fetchOrders}
+          />
+        </Modal>
+      )}
     </div>
   );
 }

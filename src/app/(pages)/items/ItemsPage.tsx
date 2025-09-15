@@ -985,7 +985,7 @@ export default function ItemsPage(): React.ReactElement {
                   ? Math.floor(displayAvailable / (colorsCount * Math.max(1, numSizes)))
                   : Math.floor(displayAvailable / colorsCount)
                 : null;
-            const maxTotalForCard = maxPerSize !== null ? maxPerSize * Math.max(1, numSizes) : null;
+            // const maxTotalForCard = maxPerSize !== null ? maxPerSize * Math.max(1, numSizes) : null;
 
             const priceDisplay = formatPrice(item.wsp ?? null);
 

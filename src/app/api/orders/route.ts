@@ -203,6 +203,8 @@ async function ensureTableExists(
       { name: "payload", type: "STRING" },
       { name: "cancelledAt", type: "TIMESTAMP" },
       { name: "cancelledBy", type: "STRING" },
+      // NEW: store only order_placed_by email
+      { name: "order_placed_by", type: "STRING" },
     ],
   };
 
@@ -452,7 +454,8 @@ export async function GET(): Promise<NextResponse> {
         o.totalQty,
         o.items,
         o.payload,
-        o._rawRow
+        o._rawRow,
+        o.order_placed_by
       FROM ${ordersTable} o
       LEFT JOIN latest_status ls ON o.id = ls.orderId
       LEFT JOIN history hs ON o.id = hs.orderId
@@ -536,6 +539,8 @@ export async function GET(): Promise<NextResponse> {
         items: parsedItems,
         payload: normalizedPayload,
         _rawRow: r,
+        // include placed-by email
+        order_placed_by: safeString(r["order_placed_by"] ?? "") || undefined,
       } as Record<string, unknown>;
     });
 
@@ -632,6 +637,9 @@ export async function POST(req: Request): Promise<NextResponse> {
       orderStatus,
       createdAt,
       source: "web",
+      // keep original payload intact (may include order_placed_by object) —
+      // server will separately persist the email-only column below
+      ...("payloadMeta" in body ? { payloadMeta: body["payloadMeta"] } : {}),
     };
 
     await ensureDatasetExists(BQ_PROJECT_ID, BQ_DATASET_ID);
@@ -639,9 +647,7 @@ export async function POST(req: Request): Promise<NextResponse> {
 
     const customerName = isObject(customerPayload)
       ? safeString(
-          (customerPayload as RawRecord).label ??
-            (customerPayload as RawRecord).name ??
-            ""
+          (customerPayload as RawRecord).label ?? (customerPayload as RawRecord).name ?? ""
         )
       : safeString(customerPayload);
     const customerNumber = isObject(customerPayload)
@@ -662,9 +668,7 @@ export async function POST(req: Request): Promise<NextResponse> {
 
     const agentName = isObject(agentPayload)
       ? safeString(
-          (agentPayload as RawRecord).label ??
-            (agentPayload as RawRecord).name ??
-            ""
+          (agentPayload as RawRecord).label ?? (agentPayload as RawRecord).name ?? ""
         )
       : safeString(agentPayload);
     const agentNumber = isObject(agentPayload)
@@ -676,6 +680,24 @@ export async function POST(req: Request): Promise<NextResponse> {
         )
       : "";
 
+    // NEW: extract 'order_placed_by' email from request (accept string or object)
+    const orderPlacedRaw =
+      body["order_placed_by"] ??
+      body["orderPlacedBy"] ??
+      body["order_placed_by_email"] ??
+      body["placed_by"] ??
+      null;
+
+    let orderPlacedByEmail = "";
+    if (typeof orderPlacedRaw === "string") {
+      orderPlacedByEmail = safeString(orderPlacedRaw);
+    } else if (isObject(orderPlacedRaw)) {
+      orderPlacedByEmail =
+        safeString((orderPlacedRaw as RawRecord).email ?? (orderPlacedRaw as RawRecord).Email ?? (orderPlacedRaw as RawRecord).emailAddress ?? "") ||
+        safeString((orderPlacedRaw as RawRecord).id ?? "");
+    }
+
+    // row to insert (note order_placed_by is a STRING column, holds only email)
     const row: Record<string, unknown> = {
       id: orderId,
       createdAt,
@@ -688,6 +710,8 @@ export async function POST(req: Request): Promise<NextResponse> {
       totalQty: Number(totalQty) || 0,
       items: JSON.stringify(itemsForPayload),
       payload: JSON.stringify(canonicalOrder),
+      // store email-only (or empty string/null)
+      order_placed_by: orderPlacedByEmail || null,
     };
 
     // If order is Confirmed -> create reservations first

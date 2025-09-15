@@ -5,7 +5,7 @@ import { BigQuery, type Query as BQQuery } from "@google-cloud/bigquery";
 export const runtime = "nodejs";
 
 type InProdRow = {
-  Product_Code: string;
+  Item: string;
   Color?: string[] | null;
   Quantity?: number | null;
 };
@@ -43,12 +43,12 @@ export async function GET() {
     // and sum the quantities. Filter out empty design_no and only return rows with total qty > 0.
     const sql = `
       SELECT
-        Product_Code,
+        Item,
         Colors AS Color,
         Quantity
       FROM (
         SELECT
-          TRIM(CAST(Design_no AS STRING)) AS Product_Code,
+          TRIM(CAST(Design_no AS STRING)) AS Item,
           ARRAY_AGG(DISTINCT TRIM(Color) IGNORE NULLS) AS Colors,
           SUM(COALESCE(CAST(Quantity AS INT64), 0)) AS Quantity
         FROM ${tableRef}
@@ -56,7 +56,7 @@ export async function GET() {
         GROUP BY TRIM(CAST(Design_no AS STRING))
       ) AS agg
       WHERE Quantity > 0
-      ORDER BY Product_Code
+      ORDER BY Item
     `;
 
     const options: BQQuery = { query: sql, useLegacySql: false };
@@ -67,7 +67,7 @@ export async function GET() {
     const rows = (rowsRaw || []).map((r): InProdRow => {
       const rec =
         r && typeof r === "object" ? (r as Record<string, unknown>) : {};
-      const prod = String(rec["Product_Code"] ?? "").trim();
+      const prod = String(rec["Item"] ?? "").trim();
       let colors: string[] = [];
       const rawColors = rec["Color"] ?? rec["Colors"] ?? null;
       if (Array.isArray(rawColors)) {
@@ -85,7 +85,7 @@ export async function GET() {
       const qty = Number.isFinite(qtyNum) ? qtyNum : null;
 
       return {
-        Product_Code: prod,
+        Item: prod,
         Color: colors,
         Quantity: qty,
       };

@@ -12,12 +12,14 @@ export default function Home(): JSX.Element {
       </header>
 
       <main className="w-full max-w-6xl mx-auto px-6 pb-16">
-        {/* use the client wrapper — this is a server component importing a client wrapper */}
+        {/* client wrapper that opens OrderForm modal on click */}
         <ClientCarouselWrapper autoplay visibleCount={3} />
       </main>
 
-      <footer className="w-full max-w-6xl mx-auto px-6 pb-8 text-sm text-gray-400">
-        <div>© {new Date().getFullYear()} Your Company</div>
+      <footer className="w-full py-6">
+        <div className="max-w-6xl mx-auto px-6 text-center text-sm text-gray-400">
+          © {new Date().getFullYear()} R.K. Studio
+        </div>
       </footer>
     </div>
   );

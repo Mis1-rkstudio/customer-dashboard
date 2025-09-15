@@ -208,8 +208,8 @@ export default function CartPage(): React.ReactElement {
       Array.isArray(
         (it as unknown as Record<string, unknown>).selectedColors
       ) &&
-      ((it as unknown as Record<string, unknown>).selectedColors as unknown[])
-        .length > 0
+      ((it as unknown as Record<string, unknown>).selectedColors as unknown[]).length >
+        0
         ? ((it as unknown as Record<string, unknown>)
             .selectedColors as string[])
         : getSelectedColors(it);
@@ -283,8 +283,8 @@ export default function CartPage(): React.ReactElement {
       Array.isArray(
         (it as unknown as Record<string, unknown>).selectedColors
       ) &&
-      ((it as unknown as Record<string, unknown>).selectedColors as unknown[])
-        .length > 0
+      ((it as unknown as Record<string, unknown>).selectedColors as unknown[]).length >
+        0
         ? ((it as unknown as Record<string, unknown>)
             .selectedColors as string[])
         : getSelectedColors(it);
@@ -342,8 +342,8 @@ export default function CartPage(): React.ReactElement {
       Array.isArray(
         (it as unknown as Record<string, unknown>).selectedColors
       ) &&
-      ((it as unknown as Record<string, unknown>).selectedColors as unknown[])
-        .length > 0
+      ((it as unknown as Record<string, unknown>).selectedColors as unknown[]).length >
+        0
         ? ((it as unknown as Record<string, unknown>)
             .selectedColors as string[])
         : getSelectedColors(it);
@@ -505,15 +505,11 @@ export default function CartPage(): React.ReactElement {
   const toggleSelectAllColors = (value: boolean): void => {
     setSelectAllColors(value);
     for (const it of cartItems) {
-      const colours = getAvailableColors(it);
-      if (value) {
-        const dedup = Array.from(
-          new Set(colours.map((c) => String(c ?? "").trim()).filter(Boolean))
-        );
-        updateItem(it.id, { selectedColors: dedup });
-      } else {
-        updateItem(it.id, { selectedColors: [] });
-      }
+      const dedup = Array.from(
+        new Set(getAvailableColors(it).map((c) => String(c ?? "").trim()).filter(Boolean))
+      );
+      if (value) updateItem(it.id, { selectedColors: dedup });
+      else updateItem(it.id, { selectedColors: [] });
     }
   };
 
@@ -659,7 +655,8 @@ export default function CartPage(): React.ReactElement {
         phone: null,
       };
 
-      const payload = {
+      // build the final payload — include order_placed_by at top-level
+      const payload: Record<string, unknown> = {
         customer: customerPayload,
         agent: null,
         items: itemsPayload,
@@ -668,7 +665,13 @@ export default function CartPage(): React.ReactElement {
           createdBy: (user?.id as string | undefined) ?? null,
           confirmed: confirmedOrder,
         },
+        order_placed_by: emailAddr ?? null, // <<--- important: save only the email here
       };
+
+      // If the customer toggled "Confirmed order" set orderStatus to 'Confirmed'
+      if (confirmedOrder) {
+        payload["orderStatus"] = "Confirmed";
+      }
 
       const res = await fetch("/api/orders", {
         method: "POST",

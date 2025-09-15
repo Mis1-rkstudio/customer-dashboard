@@ -1,10 +1,11 @@
+// src/components/OrderForm.tsx
 "use client";
 import React, { JSX, useEffect, useState } from "react";
 import CreatableSelect from "react-select/creatable";
 import { StylesConfig, CSSObjectWithLabel } from "react-select";
 import { FaTrash, FaPencilAlt } from "react-icons/fa";
+import { useUser } from "@clerk/nextjs";
 
-/* --- Types --- */
 type OptionType = {
   value: string;
   label: string;
@@ -20,65 +21,16 @@ type OptionType = {
   number?: string;
   [k: string]: unknown;
 };
+type ItemType = OptionType & { Item?: string; sku?: string; Colors?: unknown; colors?: unknown; colors_string?: unknown; };
+type OrderRow = { item: ItemType; color: string; quantity: number | string; };
 
-type ItemType = OptionType & {
-  Item?: string;
-  sku?: string;
-  Colors?: unknown;
-  colors?: unknown;
-  colors_string?: unknown;
-};
-
-type OrderRow = {
-  item: ItemType;
-  color: string;
-  quantity: number | string;
-};
-
-/* --- small helpers --- */
-function isObject(v: unknown): v is Record<string, unknown> {
-  return typeof v === "object" && v !== null;
-}
-function safeString(v: unknown): string {
-  if (v === null || v === undefined) return "";
-  return String(v).trim();
-}
-function normKey(s: unknown) {
-  return String(s ?? "").trim().toLowerCase();
-}
-
-function makeTempId(prefix = "") {
-  return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-}
-
-/** Robust phone extractor: checks many common field names */
+function isObject(v: unknown): v is Record<string, unknown> { return typeof v === "object" && v !== null; }
+function safeString(v: unknown): string { if (v === null || v === undefined) return ""; return String(v).trim(); }
+function normKey(s: unknown) { return String(s ?? "").trim().toLowerCase(); }
+function makeTempId(prefix = "") { return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`; }
 function extractPhoneFromRecord(obj?: Record<string, unknown> | null): string {
   if (!obj) return "";
-  const candidates = [
-    "number",
-    "Number",
-    "phone",
-    "Phone",
-    "contact",
-    "Contact",
-    "contact_number",
-    "Contact_Number",
-    "contactNumber",
-    "ContactNumber",
-    "mobile",
-    "Mobile",
-    "Agent_Phone",
-    "AgentPhone",
-    "agent_phone",
-    "agentPhone",
-    "Agent_Number",
-    "AgentNumber",
-    "agent_number",
-    "agentNumber",
-    "ContactNo",
-    "contact_no",
-    "Contact_No",
-  ];
+  const candidates = ["number","Number","phone","Phone","contact","Contact","contact_number","Contact_Number","contactNumber","ContactNumber","mobile","Mobile","Agent_Phone","AgentPhone","agent_phone","agentPhone","Agent_Number","AgentNumber","agent_number","agentNumber","ContactNo","contact_no","Contact_No"];
   for (const k of candidates) {
     const v = obj[k as keyof typeof obj];
     if (v !== undefined && v !== null) {
@@ -86,7 +38,6 @@ function extractPhoneFromRecord(obj?: Record<string, unknown> | null): string {
       if (s) return s;
     }
   }
-  // last resort: try any key that looks like phone digits
   for (const [, v] of Object.entries(obj)) {
     if (v == null) continue;
     const s = safeString(v);
@@ -97,13 +48,10 @@ function extractPhoneFromRecord(obj?: Record<string, unknown> | null): string {
   return "";
 }
 
-/* -------------------------
-   component
-   ------------------------- */
 export default function OrderForm({
   closeModal,
   refreshOrders,
-  createOrder, // optional prop
+  createOrder,
 }: {
   closeModal?: () => void;
   refreshOrders?: () => void;
@@ -111,27 +59,22 @@ export default function OrderForm({
 }): JSX.Element {
   const [step, setStep] = useState<number>(1);
 
-  // fetched data
+  /* state (identical to your previous file) */
   const [customers, setCustomers] = useState<OptionType[]>([]);
   const [agents, setAgents] = useState<OptionType[]>([]);
   const [availableItems, setAvailableItems] = useState<ItemType[]>([]);
-
-  // loading flags for dropdowns
   const [loadingCustomers, setLoadingCustomers] = useState<boolean>(true);
   const [loadingAgents, setLoadingAgents] = useState<boolean>(true);
   const [loadingItems, setLoadingItems] = useState<boolean>(true);
 
-  // step1
   const [selectedCustomer, setSelectedCustomer] = useState<OptionType | null>(null);
   const [customerEmail, setCustomerEmail] = useState<string>("");
   const [customerPhone, setCustomerPhone] = useState<string>("");
   const [selectedAgent, setSelectedAgent] = useState<OptionType | null>(null);
   const [agentPhone, setAgentPhone] = useState<string>("");
 
-  // confirmation toggle — default OFF now
   const [isConfirmed, setIsConfirmed] = useState<boolean>(false);
 
-  // step2
   const [orderItems, setOrderItems] = useState<OrderRow[]>([]);
   const [currentItem, setCurrentItem] = useState<ItemType | null>(null);
   const [availableColors, setAvailableColors] = useState<string[]>([]);
@@ -139,34 +82,55 @@ export default function OrderForm({
   const [currentQty, setCurrentQty] = useState<string>("");
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
 
-  // global
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [error, setError] = useState<string>("");
   const [itemError, setItemError] = useState<string>("");
   const [step1Error, setStep1Error] = useState<string>("");
 
+  // get currently logged-in Clerk user
+  const { user } = useUser();
+
+  // Safe extraction of email / name / id from Clerk's user (avoid using `user.email` which isn't on Clerk's UserResource)
+  const loggedInEmail: string | null = (() => {
+    // prefer primaryEmailAddress.emailAddress
+    if (typeof user?.primaryEmailAddress?.emailAddress === "string" && user.primaryEmailAddress.emailAddress.trim()) {
+      return user.primaryEmailAddress.emailAddress.trim();
+    }
+
+    // fallback to emailAddresses array if present
+    const maybeEmails = (user as unknown as { emailAddresses?: unknown }).emailAddresses;
+    if (Array.isArray(maybeEmails) && (maybeEmails as unknown[]).length > 0) {
+      const first = (maybeEmails as Array<{ emailAddress?: unknown }>)[0];
+      if (first && typeof first.emailAddress === "string" && first.emailAddress.trim()) {
+        return first.emailAddress.trim();
+      }
+    }
+
+    // no usable email
+    return null;
+  })();
+
+  const loggedInName: string | null = (() => {
+    if (typeof user?.firstName === "string" && user.firstName.trim()) {
+      const last = typeof user?.lastName === "string" && user.lastName.trim() ? ` ${user.lastName.trim()}` : "";
+      return `${user.firstName.trim()}${last}`.trim();
+    }
+    // fallback: fullName if Clerk provides it
+    const maybeFull = (user as unknown as { fullName?: unknown }).fullName;
+    if (typeof maybeFull === "string" && maybeFull.trim()) return maybeFull.trim();
+    return null;
+  })();
+
+  const loggedInId: string | null = typeof user?.id === "string" ? user.id : null;
+
   const customStyles: StylesConfig<OptionType | ItemType, false> = {
-    control: (provided: CSSObjectWithLabel) => ({
-      ...provided,
-      backgroundColor: "#1f2937",
-      borderColor: "#374151",
-      color: "white",
-      minHeight: "42px",
-    }),
+    control: (provided: CSSObjectWithLabel) => ({ ...provided, backgroundColor: "#1f2937", borderColor: "#374151", color: "white", minHeight: "42px" }),
     singleValue: (provided: CSSObjectWithLabel) => ({ ...provided, color: "white" }),
     menu: (provided: CSSObjectWithLabel) => ({ ...provided, backgroundColor: "#1f2937" }),
-    option: (provided: CSSObjectWithLabel, state: { isSelected?: boolean; isFocused?: boolean }) => ({
-      ...provided,
-      backgroundColor: state.isSelected ? "#3b82f6" : state.isFocused ? "#374151" : "#1f2937",
-      color: "white",
-    }),
+    option: (provided: CSSObjectWithLabel, state: { isSelected?: boolean; isFocused?: boolean }) => ({ ...provided, backgroundColor: state.isSelected ? "#3b82f6" : state.isFocused ? "#374151" : "#1f2937", color: "white" }),
     input: (provided: CSSObjectWithLabel) => ({ ...provided, color: "white" }),
     placeholder: (provided: CSSObjectWithLabel) => ({ ...provided, color: "#9ca3af" }),
   };
-
-  /* -------------------------
-     Helpers: normalize, merge, find
-     ------------------------- */
 
   function findExistingOption(list: OptionType[], name: string): OptionType | undefined {
     const key = normKey(name);
@@ -176,25 +140,16 @@ export default function OrderForm({
     });
   }
 
-  /* -------------------------
-     Parse / normalise fetch responses (accept [] or { rows: [] })
-     ------------------------- */
   const normalizeListResponse = async (res: Response): Promise<unknown[]> => {
     if (!res.ok) return [];
     const json = await res.json().catch(() => null);
     if (Array.isArray(json)) return json;
-    if (isObject(json) && Array.isArray((json as Record<string, unknown>).rows))
-      return (json as Record<string, unknown>).rows as unknown[];
-    if (isObject(json) && Array.isArray((json as Record<string, unknown>).orders))
-      return (json as Record<string, unknown>).orders as unknown[];
-    // If the endpoint returns an object map, attempt to extract values
+    if (isObject(json) && Array.isArray((json as Record<string, unknown>).rows)) return (json as Record<string, unknown>).rows as unknown[];
+    if (isObject(json) && Array.isArray((json as Record<string, unknown>).orders)) return (json as Record<string, unknown>).orders as unknown[];
     if (isObject(json)) return Object.values(json);
     return [];
   };
 
-  /* -------------------------
-     Fetch data (BQ / API)
-     ------------------------- */
   useEffect(() => {
     async function fetchData(): Promise<void> {
       setLoadingCustomers(true);
@@ -214,15 +169,7 @@ export default function OrderForm({
 
         const mapCustomer = (cRaw: unknown): OptionType => {
           const c = (cRaw ?? {}) as Record<string, unknown>;
-          // choose best available label fields for customers
-          const company =
-            safeString(c.Company_Name) ||
-            safeString(c.company_name) ||
-            safeString(c.Company) ||
-            safeString(c.name) ||
-            safeString(c.label) ||
-            safeString(c.value) ||
-            "";
+          const company = safeString(c.Company_Name) || safeString(c.company_name) || safeString(c.Company) || safeString(c.name) || safeString(c.label) || safeString(c.value) || "";
           const city = safeString(c.City || c.city || "");
           const contactEmail = safeString(c.Email ?? c.email ?? "");
           const contactNumber = extractPhoneFromRecord(c) || "";
@@ -235,7 +182,6 @@ export default function OrderForm({
             Number: contactNumber || undefined,
             Broker: safeString(c.Broker ?? c.broker ?? ""),
             Agent_Name: safeString(c.Agent_Name ?? c.agent_name ?? "") || undefined,
-            // pass-through possible agent_id fields
             agent_id: c.agent_id ?? c.Agent_ID ?? c.agentId ?? undefined,
             id: (c.id ?? c._id ?? c.id) as string | number | undefined,
           } as OptionType;
@@ -243,17 +189,7 @@ export default function OrderForm({
 
         const mapAgent = (aRaw: unknown): OptionType => {
           const a = (aRaw ?? {}) as Record<string, unknown>;
-          // pick the best name candidate among several possible fields
-          const nameCandidate =
-            safeString(a.Company_Name) ||
-            safeString(a.Agent_Name) ||
-            safeString(a.Agent) ||
-            safeString(a.name) ||
-            safeString(a.label) ||
-            safeString(a.value) ||
-            safeString(a.Email) ||
-            safeString(a.email) ||
-            "";
+          const nameCandidate = safeString(a.Company_Name) || safeString(a.Agent_Name) || safeString(a.Agent) || safeString(a.name) || safeString(a.label) || safeString(a.value) || safeString(a.Email) || safeString(a.email) || "";
           const phoneCandidate = extractPhoneFromRecord(a);
           return {
             ...a,
@@ -273,7 +209,6 @@ export default function OrderForm({
           else if (Array.isArray(i.colors)) colors = (i.colors as unknown[]).map(String);
           else if (i.colors_string) colors = String(i.colors_string).split(",").map((s) => s.trim()).filter(Boolean);
           else if (i.Color) colors = [String(i.Color).trim()];
-
           colors = Array.from(new Set(colors.map((c) => String(c || "").trim()).filter(Boolean)));
           const label = (i.Item ?? i.sku ?? i.label ?? String(i.id ?? "")) as string;
           return {
@@ -287,15 +222,11 @@ export default function OrderForm({
 
         const mappedCustomersBQ: OptionType[] = (customersBQ as unknown[]).map(mapCustomer);
         const mergedCustomers = mappedCustomersBQ;
-
         const mappedAgentsBQ: OptionType[] = (agentsBQ as unknown[]).map(mapAgent);
         const mergedAgents = mappedAgentsBQ;
-
         const mappedItems: ItemType[] = Array.isArray(itemsBQ) ? (itemsBQ as unknown[]).map(mapItem) : [];
         const itemMap = new Map<string, ItemType>();
-        for (const it of mappedItems) {
-          itemMap.set(normKey(it.value), it);
-        }
+        for (const it of mappedItems) itemMap.set(normKey(it.value), it);
         const mergedItems = Array.from(itemMap.values());
 
         setCustomers(mergedCustomers);
@@ -310,29 +241,18 @@ export default function OrderForm({
         setLoadingItems(false);
       }
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     void fetchData();
   }, []);
 
-  /* -------------------------
-     Autofill agent when customer chosen
-     ------------------------- */
   useEffect(() => {
-    // If no customer selected -> clear agent fields
     if (!selectedCustomer) {
-      setSelectedAgent(null);
-      setAgentPhone("");
-      setCustomerEmail("");
-      setCustomerPhone("");
+      setSelectedAgent(null); setAgentPhone(""); setCustomerEmail(""); setCustomerPhone("");
       return;
     }
-
-    // fill basic customer contact fields
     const sc = selectedCustomer as Record<string, unknown>;
     setCustomerEmail(safeString(sc.Email ?? sc.email ?? sc.contact_email ?? ""));
     setCustomerPhone(extractPhoneFromRecord(sc) || "");
 
-    // Candidate names / ids that might point to agent
     const candidateNames = [
       safeString(sc.Broker ?? sc.broker ?? ""),
       safeString(sc.Agent_Name ?? sc.agent_name ?? ""),
@@ -342,154 +262,76 @@ export default function OrderForm({
       safeString(sc.BrokerName ?? sc.broker_name ?? ""),
     ].filter(Boolean);
 
-    // prefer explicit agent id fields if present
     const agentIdCandidate = safeString(sc.agent_id ?? sc.Agent_ID ?? sc.agentId ?? sc.AgentId ?? sc.agent ?? "");
-    // also check nested agent object like sc.Agent?.name or sc.agent?.name
     let nestedAgentName = "";
     try {
       const maybeAgent = (sc.Agent ?? sc.agent) as Record<string, unknown> | undefined;
       if (isObject(maybeAgent)) nestedAgentName = safeString(maybeAgent.name ?? maybeAgent.Agent_Name ?? maybeAgent.Company_Name ?? "");
-    } catch {
-      nestedAgentName = "";
-    }
+    } catch { nestedAgentName = ""; }
     if (nestedAgentName) candidateNames.unshift(nestedAgentName);
 
-    // attempt match by id first (case-insensitive)
     if (agentIdCandidate) {
-      const foundById = agents.find(
-        (a) =>
-          String(a.id ?? a.agent_id ?? a.value ?? "")
-            .toLowerCase()
-            .trim() === agentIdCandidate.toLowerCase().trim()
-      );
-      if (foundById) {
-        setSelectedAgent(foundById);
-        setAgentPhone(extractPhoneFromRecord(foundById as Record<string, unknown>) || "");
-        return;
-      }
+      const foundById = agents.find((a) => String(a.id ?? a.agent_id ?? a.value ?? "").toLowerCase().trim() === agentIdCandidate.toLowerCase().trim());
+      if (foundById) { setSelectedAgent(foundById); setAgentPhone(extractPhoneFromRecord(foundById as Record<string, unknown>) || ""); return; }
     }
 
-    // attempt to match by any of candidateNames
     for (const nm of candidateNames) {
       if (!nm) continue;
       const foundByName = agents.find((a) => {
         const name = String(a.Company_Name ?? a.Agent_Name ?? a.label ?? a.value ?? "").trim();
         return name && name.toLowerCase() === nm.toLowerCase();
       });
-      if (foundByName) {
-        setSelectedAgent(foundByName);
-        setAgentPhone(extractPhoneFromRecord(foundByName as Record<string, unknown>) || "");
-        return;
-      }
+      if (foundByName) { setSelectedAgent(foundByName); setAgentPhone(extractPhoneFromRecord(foundByName as Record<string, unknown>) || ""); return; }
     }
 
-    // If customer has a candidate agent name but agents list doesn't contain it,
-    // create optimistic local agent entry and select it so the agent dropdown is filled.
     const firstCandidate = candidateNames[0] || nestedAgentName || "";
     if (firstCandidate) {
-      // check again if an agent with that key exists in a slightly different normalization
       const existing = findExistingOption(agents, firstCandidate);
-      if (existing) {
-        setSelectedAgent(existing);
-        setAgentPhone(extractPhoneFromRecord(existing as Record<string, unknown>) || "");
-        return;
-      }
-      // create optimistic agent (local only)
-      const suggestedPhone =
-        extractPhoneFromRecord(sc) ||
-        safeString(sc.Agent_Phone ?? sc.AgentPhone ?? sc.agent_phone ?? sc.agentPhone ?? sc.contact_number ?? "");
+      if (existing) { setSelectedAgent(existing); setAgentPhone(extractPhoneFromRecord(existing as Record<string, unknown>) || ""); return; }
+      const suggestedPhone = extractPhoneFromRecord(sc) || safeString(sc.Agent_Phone ?? sc.AgentPhone ?? sc.agent_phone ?? sc.agentPhone ?? sc.contact_number ?? "");
       const tempId = makeTempId("a_");
-      const optimisticAgent: OptionType = {
-        value: firstCandidate,
-        label: firstCandidate,
-        Company_Name: firstCandidate,
-        Agent_Name: firstCandidate,
-        number: suggestedPhone || undefined,
-        id: tempId,
-      };
+      const optimisticAgent: OptionType = { value: firstCandidate, label: firstCandidate, Company_Name: firstCandidate, Agent_Name: firstCandidate, number: suggestedPhone || undefined, id: tempId };
       setAgents((prev) => [optimisticAgent, ...prev]);
       setSelectedAgent(optimisticAgent);
       setAgentPhone(suggestedPhone);
       return;
     }
 
-    // fallback: leave agent empty
-    setSelectedAgent(null);
-    setAgentPhone("");
+    setSelectedAgent(null); setAgentPhone("");
   }, [selectedCustomer, agents]);
 
-  /* -------------------------
-     Creatable handlers (local optimistic)
-     ------------------------- */
   async function handleCreateCustomer(input: string): Promise<void> {
-    const name = input.trim();
-    if (!name) return;
+    const name = input.trim(); if (!name) return;
     const existing = findExistingOption(customers, name);
-    if (existing) {
-      setSelectedCustomer(existing);
-      setCustomerEmail(safeString(existing.Email ?? existing.email ?? ""));
-      setCustomerPhone(extractPhoneFromRecord(existing as Record<string, unknown>) || "");
-      return;
-    }
-
+    if (existing) { setSelectedCustomer(existing); setCustomerEmail(safeString(existing.Email ?? existing.email ?? "")); setCustomerPhone(extractPhoneFromRecord(existing as Record<string, unknown>) || ""); return; }
     const tempId = makeTempId("c_");
-    const optimistic: OptionType = {
-      value: name,
-      label: name,
-      Company_Name: name,
-      Email: customerEmail || undefined,
-      Number: customerPhone || undefined,
-      id: tempId,
-    };
+    const optimistic: OptionType = { value: name, label: name, Company_Name: name, Email: customerEmail || undefined, Number: customerPhone || undefined, id: tempId };
     setCustomers((prev) => [optimistic, ...prev]);
     setSelectedCustomer(optimistic);
-    // local-only
   }
 
   async function handleCreateAgent(input: string): Promise<void> {
-    const name = input.trim();
-    if (!name) return;
+    const name = input.trim(); if (!name) return;
     const existing = findExistingOption(agents, name);
-    if (existing) {
-      setSelectedAgent(existing);
-      setAgentPhone(extractPhoneFromRecord(existing as Record<string, unknown>) || "");
-      return;
-    }
-
+    if (existing) { setSelectedAgent(existing); setAgentPhone(extractPhoneFromRecord(existing as Record<string, unknown>) || ""); return; }
     const tempId = makeTempId("a_");
-    const optimistic: OptionType = {
-      value: name,
-      label: name,
-      Company_Name: name,
-      Agent_Name: name,
-      number: agentPhone || undefined,
-      id: tempId,
-    };
+    const optimistic: OptionType = { value: name, label: name, Company_Name: name, Agent_Name: name, number: agentPhone || undefined, id: tempId };
     setAgents((prev) => [optimistic, ...prev]);
     setSelectedAgent(optimistic);
-    // local-only
   }
 
   async function handleCreateItem(input: string): Promise<void> {
-    const name = input.trim();
-    if (!name) return;
+    const name = input.trim(); if (!name) return;
     const key = normKey(name);
     const existing = availableItems.find((it) => normKey(it.value) === key || normKey(it.label) === key);
-    if (existing) {
-      setCurrentItem(existing);
-      setAvailableColors(existing.colors ? (existing.colors as string[]).map(String) : []);
-      return;
-    }
-
+    if (existing) { setCurrentItem(existing); setAvailableColors(existing.colors ? (existing.colors as string[]).map(String) : []); return; }
     const tempId = makeTempId("i_");
     const optimistic: ItemType = { value: name, label: name, colors: [], id: tempId };
     setAvailableItems((prev) => [optimistic, ...prev]);
     setCurrentItem(optimistic);
     setAvailableColors([]);
-    // local-only
   }
 
-  /* --- helpers to merge order rows (avoid duplicates) --- */
   function addOrMergeRows(existing: OrderRow[], newRows: OrderRow[]): OrderRow[] {
     const map = new Map<string, OrderRow>();
     for (const r of existing) {
@@ -509,150 +351,50 @@ export default function OrderForm({
     return Array.from(map.values());
   }
 
-  /* --- handlers with typed params --- */
-  const handleCustomerChange = (opt: OptionType | null): void => {
-    setSelectedCustomer(opt);
-    setStep1Error("");
-    setError("");
-  };
-
-  const handleAgentChange = (opt: OptionType | null): void => {
-    setSelectedAgent(opt);
-    setAgentPhone(extractPhoneFromRecord(opt as Record<string, unknown>) || "");
-    setStep1Error("");
-  };
-
-  const handleItemChange = (opt: ItemType | null): void => {
-    setCurrentItem(opt);
-    setSelectedColors([]);
-    setCurrentQty("");
-    setItemError("");
-    setEditingIndex(null);
-
-    if (opt && Array.isArray(opt.colors) && opt.colors.length > 0) {
-      setAvailableColors((opt.colors as unknown[]).map(String));
-    } else {
-      setAvailableColors([]);
-    }
-  };
-
-  const toggleColor = (color: string): void => {
-    setSelectedColors((prev) => (prev.includes(color) ? prev.filter((c) => c !== color) : [...prev, color]));
-    setItemError("");
-  };
-
-  const minColorsRequired = (): number => {
-    if (availableColors.length >= 3) return 3;
-    if (availableColors.length >= 1) return 1;
-    return 0;
-  };
-
-  const canAddOrUpdate = (): boolean => {
-    const qtyNum = Number(currentQty);
-    const minReq = minColorsRequired();
-    const selectedCount = Array.isArray(selectedColors) ? selectedColors.length : 0;
-    return !!currentItem && selectedCount >= minReq && !Number.isNaN(qtyNum) && qtyNum > 0;
-  };
+  const handleCustomerChange = (opt: OptionType | null): void => { setSelectedCustomer(opt); setStep1Error(""); setError(""); };
+  const handleAgentChange = (opt: OptionType | null): void => { setSelectedAgent(opt); setAgentPhone(extractPhoneFromRecord(opt as Record<string, unknown>) || ""); setStep1Error(""); };
+  const handleItemChange = (opt: ItemType | null): void => { setCurrentItem(opt); setSelectedColors([]); setCurrentQty(""); setItemError(""); setEditingIndex(null); if (opt && Array.isArray(opt.colors) && opt.colors.length > 0) setAvailableColors((opt.colors as unknown[]).map(String)); else setAvailableColors([]); };
+  const toggleColor = (color: string): void => { setSelectedColors((prev) => (prev.includes(color) ? prev.filter((c) => c !== color) : [...prev, color])); setItemError(""); };
+  const minColorsRequired = (): number => { if (availableColors.length >= 3) return 3; if (availableColors.length >= 1) return 1; return 0; };
+  const canAddOrUpdate = (): boolean => { const qtyNum = Number(currentQty); const minReq = minColorsRequired(); const selectedCount = Array.isArray(selectedColors) ? selectedColors.length : 0; return !!currentItem && selectedCount >= minReq && !Number.isNaN(qtyNum) && qtyNum > 0; };
 
   const handleAddOrUpdateItem = (): void => {
     setItemError("");
-    if (!currentItem) {
-      setItemError("Please select an item.");
-      return;
-    }
+    if (!currentItem) { setItemError("Please select an item."); return; }
     const qty = Number(currentQty);
-    if (currentQty === "" || Number.isNaN(qty) || qty <= 0) {
-      setItemError("Quantity must be a number greater than 0.");
-      return;
-    }
-
+    if (currentQty === "" || Number.isNaN(qty) || qty <= 0) { setItemError("Quantity must be a number greater than 0."); return; }
     const minReq = minColorsRequired();
     const selCount = selectedColors.length;
-
-    if (minReq > 0 && selCount < minReq) {
-      setItemError(`Please select at least ${minReq} color${minReq > 1 ? "s" : ""} before adding.`);
-      return;
-    }
-
+    if (minReq > 0 && selCount < minReq) { setItemError(`Please select at least ${minReq} color${minReq > 1 ? "s" : ""} before adding.`); return; }
     let newEntries: OrderRow[] = [];
-    if (selCount > 0) {
-      newEntries = selectedColors.map((col) => ({
-        item: currentItem,
-        color: col,
-        quantity: qty,
-      }));
-    } else {
-      newEntries = [{ item: currentItem, color: "", quantity: qty }];
-    }
-
+    if (selCount > 0) newEntries = selectedColors.map((col) => ({ item: currentItem, color: col, quantity: qty }));
+    else newEntries = [{ item: currentItem, color: "", quantity: qty }];
     if (editingIndex !== null && editingIndex >= 0 && editingIndex < orderItems.length) {
-      const updated = [...orderItems];
-      updated.splice(editingIndex, 1, ...newEntries);
-      setOrderItems(addOrMergeRows(updated, []));
-      setEditingIndex(null);
-    } else {
-      setOrderItems((prev) => addOrMergeRows(prev, newEntries));
-    }
-
-    setCurrentItem(null);
-    setAvailableColors([]);
-    setSelectedColors([]);
-    setCurrentQty("");
+      const updated = [...orderItems]; updated.splice(editingIndex, 1, ...newEntries); setOrderItems(addOrMergeRows(updated, [])); setEditingIndex(null);
+    } else setOrderItems((prev) => addOrMergeRows(prev, newEntries));
+    setCurrentItem(null); setAvailableColors([]); setSelectedColors([]); setCurrentQty("");
   };
 
   const handleEditRow = (index: number): void => {
-    const row = orderItems[index];
-    if (!row) return;
-    setEditingIndex(index);
-    setCurrentItem(row.item ?? null);
-    setAvailableColors(row.item?.colors ? (row.item.colors as unknown[]).map(String) : []);
-    setSelectedColors(row.color ? [row.color] : []);
-    setCurrentQty(String(row.quantity ?? ""));
-    setStep(2);
+    const row = orderItems[index]; if (!row) return;
+    setEditingIndex(index); setCurrentItem(row.item ?? null); setAvailableColors(row.item?.colors ? (row.item.colors as unknown[]).map(String) : []); setSelectedColors(row.color ? [row.color] : []); setCurrentQty(String(row.quantity ?? "")); setStep(2);
   };
-
   const handleDeleteRow = (index: number): void => {
     setOrderItems((prev) => prev.filter((_, i) => i !== index));
-    if (editingIndex === index) {
-      setEditingIndex(null);
-      setCurrentItem(null);
-      setAvailableColors([]);
-      setSelectedColors([]);
-      setCurrentQty("");
-    }
+    if (editingIndex === index) { setEditingIndex(null); setCurrentItem(null); setAvailableColors([]); setSelectedColors([]); setCurrentQty(""); }
   };
-
-  const validateStep1 = (): boolean => {
-    if (!selectedCustomer) {
-      setStep1Error("Please select a customer.");
-      return false;
-    }
-    if (!selectedAgent) {
-      setStep1Error("Please select an agent.");
-      return false;
-    }
-    setStep1Error("");
-    return true;
-  };
+  const validateStep1 = (): boolean => { if (!selectedCustomer) { setStep1Error("Please select a customer."); return false; } if (!selectedAgent) { setStep1Error("Please select an agent."); return false; } setStep1Error(""); return true; };
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>): Promise<void> => {
     e.preventDefault();
     setError("");
     if (!validateStep1()) return;
-    if (orderItems.length === 0) {
-      setError("Add at least one item to the order.");
-      return;
-    }
-    for (const r of orderItems) {
-      if (!r.quantity || Number.isNaN(Number(r.quantity)) || Number(r.quantity) <= 0) {
-        setError("All order items must have quantity > 0.");
-        return;
-      }
-    }
+    if (orderItems.length === 0) { setError("Add at least one item to the order."); return; }
+    for (const r of orderItems) { if (!r.quantity || Number.isNaN(Number(r.quantity)) || Number(r.quantity) <= 0) { setError("All order items must have quantity > 0."); return; } }
 
     setIsSubmitting(true);
     try {
-      const payload = {
+      const payloadBase = {
         customer: {
           id: selectedCustomer?.id ?? selectedCustomer?.value ?? null,
           name: selectedCustomer?.label ?? selectedCustomer?.value ?? "",
@@ -673,6 +415,16 @@ export default function OrderForm({
         orderStatus: isConfirmed ? "Confirmed" : "Unconfirmed",
       };
 
+      // attach order_placed_by (current logged-in clerk user)
+      const payload = {
+        ...payloadBase,
+        order_placed_by: {
+          id: loggedInId ?? null,
+          email: loggedInEmail ?? null,
+          name: loggedInName ?? null,
+        },
+      };
+
       let body: unknown = null;
       if (typeof createOrder === "function") {
         body = await createOrder(payload);
@@ -685,10 +437,7 @@ export default function OrderForm({
         const ct = res.headers.get("content-type") ?? "";
         body = ct.includes("application/json") ? await res.json().catch(() => null) : null;
         if (!res.ok) {
-          const serverMsg =
-            isObject(body) && typeof (body as Record<string, unknown>).message === "string"
-              ? (body as Record<string, unknown>).message
-              : `HTTP ${res.status}`;
+          const serverMsg = isObject(body) && typeof (body as Record<string, unknown>).message === "string" ? (body as Record<string, unknown>).message : `HTTP ${res.status}`;
           throw new Error(String(serverMsg));
         }
       }
@@ -718,11 +467,7 @@ export default function OrderForm({
       }
 
       if (typeof refreshOrders === "function") {
-        try {
-          await refreshOrders();
-        } catch (e) {
-          console.warn("refreshOrders failed after create:", e);
-        }
+        try { await refreshOrders(); } catch (e) { console.warn("refreshOrders failed after create:", e); }
       }
       if (typeof closeModal === "function") closeModal();
     } catch (errUnknown) {
@@ -735,50 +480,32 @@ export default function OrderForm({
     }
   };
 
-  /* -------------------------
-     Render
-     ------------------------- */
-
+  /* --- render (unchanged) --- */
   return (
     <form onSubmit={handleSubmit} className="bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-3xl mx-auto">
       <h2 className="text-2xl font-bold text-white mb-6">Create Order</h2>
-
       {error && <div className="text-red-400 bg-red-900/30 border border-red-700 p-3 rounded mb-4">{error}</div>}
-
       {step === 1 ? (
         <div>
-          {/* Step 1 UI */}
+          {/* Step 1 UI (same as before) */}
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Customer</label>
             <CreatableSelect<OptionType, false>
               styles={customStyles}
               options={customers}
               value={selectedCustomer}
-              onChange={(opt) => handleCustomerChange(opt as OptionType | null)}
-              onCreateOption={(input) => {
-                void handleCreateCustomer(input);
-              }}
-              isClearable
-              isSearchable
-              isLoading={loadingCustomers}
-              isDisabled={loadingCustomers}
+              onChange={(opt) => { setSelectedCustomer(opt as OptionType | null); setStep1Error(""); setError(""); }}
+              onCreateOption={(input) => void handleCreateCustomer(input)}
+              isClearable isSearchable isLoading={loadingCustomers} isDisabled={loadingCustomers}
               placeholder={loadingCustomers ? "Loading customers..." : "Select or type to add customer..."}
               getOptionLabel={(o: OptionType) => safeString(o.Company_Name ?? o.label ?? o.value ?? o.Agent_Name ?? "")}
               getOptionValue={(o: OptionType) => String(o.id ?? o.value ?? o.label ?? "")}
             />
           </div>
-
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Email</label>
-              <input value={customerEmail} onChange={(e) => setCustomerEmail(e.target.value)} className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-300 mb-2">Phone</label>
-              <input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3" />
-            </div>
+            <div><label className="block text-sm font-medium text-gray-300 mb-2">Email</label><input value={customerEmail} onChange={(e) => setCustomerEmail(e.target.value)} className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3" /></div>
+            <div><label className="block text-sm font-medium text-gray-300 mb-2">Phone</label><input value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3" /></div>
           </div>
-
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Agent</label>
             <CreatableSelect<OptionType, false>
@@ -786,46 +513,22 @@ export default function OrderForm({
               options={agents}
               value={selectedAgent}
               onChange={(opt) => handleAgentChange(opt as OptionType | null)}
-              onCreateOption={(input) => {
-                void handleCreateAgent(input);
-              }}
-              isClearable
-              isSearchable
-              isLoading={loadingAgents}
-              isDisabled={loadingAgents}
+              onCreateOption={(input) => void handleCreateAgent(input)}
+              isClearable isSearchable isLoading={loadingAgents} isDisabled={loadingAgents}
               placeholder={loadingAgents ? "Loading agents..." : "Select or type to add agent..."}
-              getOptionLabel={(o: OptionType) =>
-                safeString(o.Company_Name ?? o.Agent_Name ?? o.label ?? o.value ?? o.email ?? o.Email ?? "")
-              }
+              getOptionLabel={(o: OptionType) => safeString(o.Company_Name ?? o.Agent_Name ?? o.label ?? o.value ?? o.email ?? o.Email ?? "")}
               getOptionValue={(o: OptionType) => String(o.id ?? o.value ?? o.label ?? "")}
             />
           </div>
-
-          <div className="mb-4">
-            <label className="block text-sm font-medium text-gray-300 mb-2">Agent Phone</label>
-            <input value={agentPhone} onChange={(e) => setAgentPhone(e.target.value)} className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3" />
-          </div>
-
+          <div className="mb-4"><label className="block text-sm font-medium text-gray-300 mb-2">Agent Phone</label><input value={agentPhone} onChange={(e) => setAgentPhone(e.target.value)} className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3" /></div>
           {step1Error && <div className="text-red-400 mb-4">{step1Error}</div>}
-
           <div className="flex justify-end mt-6">
-            <button
-              type="button"
-              onClick={() => {
-                if (validateStep1()) {
-                  setStep(2);
-                  setError("");
-                }
-              }}
-              className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md"
-            >
-              Next
-            </button>
+            <button type="button" onClick={() => { if (validateStep1()) { setStep(2); setError(""); } }} className="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-md">Next</button>
           </div>
         </div>
       ) : (
         <div>
-          {/* Step 2 UI */}
+          {/* Step 2 UI (same as before) */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">Item</label>
@@ -834,127 +537,52 @@ export default function OrderForm({
                 options={availableItems}
                 value={currentItem}
                 onChange={(opt) => handleItemChange(opt as ItemType | null)}
-                onCreateOption={(input) => {
-                  void handleCreateItem(input);
-                }}
+                onCreateOption={(input) => void handleCreateItem(input)}
                 placeholder={loadingItems ? "Loading items..." : "Select item..."}
-                isClearable
-                isSearchable
-                isLoading={loadingItems}
-                isDisabled={loadingItems}
+                isClearable isSearchable isLoading={loadingItems} isDisabled={loadingItems}
                 getOptionLabel={(o: ItemType) => safeString(o.label ?? o.value ?? "")}
                 getOptionValue={(o: ItemType) => String(o.id ?? o.value ?? o.label ?? "")}
               />
             </div>
-
             <div>
               <label className="block text-sm font-medium text-gray-300 mb-2">Quantity (in sets)</label>
-              <input type="number" min="1" value={currentQty} onChange={(e) => setCurrentQty(e.target.value)} placeholder="" className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3" />
+              <input type="number" min="1" value={currentQty} onChange={(e) => setCurrentQty(e.target.value)} className="w-full bg-gray-900 text-white border border-gray-700 rounded-md py-2 px-3" />
             </div>
           </div>
-
           <div className="mb-4">
             <label className="block text-sm font-medium text-gray-300 mb-2">Colors (click to select)</label>
-
             <div className="p-3 border border-gray-700 rounded bg-gray-900 min-h-[56px] flex flex-wrap gap-2">
-              {availableColors.length === 0 ? (
-                <div className="text-gray-400">Select an item to see its available colors.</div>
-              ) : (
-                availableColors.map((c) => {
-                  const selected = selectedColors.includes(c);
-                  return (
-                    <button key={c} type="button" onClick={() => toggleColor(c)} className={`px-3 py-1 rounded-full text-sm font-semibold focus:outline-none transition ${selected ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-200 hover:bg-gray-600"}`}>
-                      {c}
-                    </button>
-                  );
-                })
-              )}
+              {availableColors.length === 0 ? <div className="text-gray-400">Select an item to see its available colors.</div> : availableColors.map((c) => {
+                const selected = selectedColors.includes(c);
+                return (<button key={c} type="button" onClick={() => toggleColor(c)} className={`px-3 py-1 rounded-full text-sm font-semibold focus:outline-none transition ${selected ? "bg-blue-600 text-white" : "bg-gray-700 text-gray-200 hover:bg-gray-600"}`}>{c}</button>);
+              })}
             </div>
-
-            <div className="mt-2 text-xs text-gray-400">
-              <span>
-                {availableColors.length >= 3 ? "Minimum 3 colors required." : availableColors.length >= 1 ? "Select at least 1 color." : "No colors available — you may add the item without selecting colors."}
-              </span>
-            </div>
-
+            <div className="mt-2 text-xs text-gray-400"><span>{availableColors.length >= 3 ? "Minimum 3 colors required." : availableColors.length >= 1 ? "Select at least 1 color." : "No colors available — you may add the item without selecting colors."}</span></div>
             {itemError && <div className="text-red-400 mt-2">{itemError}</div>}
           </div>
-
           <div className="flex justify-end mb-4 gap-3">
-            <button type="button" onClick={() => { handleAddOrUpdateItem(); }} disabled={!canAddOrUpdate()} className={`bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md disabled:opacity-50 disabled:cursor-not-allowed`}>
-              {editingIndex !== null ? "Update Item" : "Add Item"}
-            </button>
+            <button type="button" onClick={() => { handleAddOrUpdateItem(); }} disabled={!canAddOrUpdate()} className={`bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-md disabled:opacity-50 disabled:cursor-not-allowed`}>{editingIndex !== null ? "Update Item" : "Add Item"}</button>
           </div>
-
-          {/* Items table */}
           <div className="mb-6 overflow-x-auto">
             <h3 className="text-lg font-semibold text-white mb-2">Order Items</h3>
             <table className="min-w-full divide-y divide-gray-700 bg-gray-900 rounded-md">
-              <thead className="bg-gray-800">
-                <tr>
-                  <th className="px-4 py-3 text-left text-sm text-gray-300">Item Name</th>
-                  <th className="px-4 py-3 text-left text-sm text-gray-300">Color</th>
-                  <th className="px-4 py-3 text-right text-sm text-gray-300">Quantity</th>
-                  <th className="px-4 py-3 text-center text-sm text-gray-300">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-700">
-                {orderItems.map((it, idx) => (
-                  <tr key={idx} className="bg-gray-800">
-                    <td className="px-4 py-3 text-sm text-gray-100">{it.item?.label ?? it.item?.Item ?? it.item?.value}</td>
-                    <td className="px-4 py-3 text-sm text-gray-200">{it.color || "—"}</td>
-                    <td className="px-4 py-3 text-sm text-gray-200 text-right">{it.quantity}</td>
-                    <td className="px-4 py-3 text-sm text-gray-200 text-center">
-                      <div className="inline-flex items-center gap-2">
-                        <button type="button" onClick={(e) => { e.stopPropagation(); handleEditRow(idx); }} title="Edit" className="p-2 rounded hover:bg-gray-700">
-                          <FaPencilAlt className="text-yellow-400" />
-                        </button>
-                        <button type="button" onClick={(e) => { e.stopPropagation(); handleDeleteRow(idx); }} title="Delete" className="p-2 rounded hover:bg-gray-700">
-                          <FaTrash className="text-red-400" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-                {orderItems.length === 0 && (
-                  <tr>
-                    <td colSpan={4} className="px-4 py-6 text-center text-sm text-gray-400">
-                      No items added yet.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
+              <thead className="bg-gray-800"><tr><th className="px-4 py-3 text-left text-sm text-gray-300">Item Name</th><th className="px-4 py-3 text-left text-sm text-gray-300">Color</th><th className="px-4 py-3 text-right text-sm text-gray-300">Quantity</th><th className="px-4 py-3 text-center text-sm text-gray-300">Actions</th></tr></thead>
+              <tbody className="divide-y divide-gray-700">{orderItems.map((it, idx) => (<tr key={idx} className="bg-gray-800"><td className="px-4 py-3 text-sm text-gray-100">{it.item?.label ?? it.item?.Item ?? it.item?.value}</td><td className="px-4 py-3 text-sm text-gray-200">{it.color || "—"}</td><td className="px-4 py-3 text-sm text-gray-200 text-right">{it.quantity}</td><td className="px-4 py-3 text-sm text-gray-200 text-center"><div className="inline-flex items-center gap-2"><button type="button" onClick={(e) => { e.stopPropagation(); handleEditRow(idx); }} title="Edit" className="p-2 rounded hover:bg-gray-700"><FaPencilAlt className="text-yellow-400" /></button><button type="button" onClick={(e) => { e.stopPropagation(); handleDeleteRow(idx); }} title="Delete" className="p-2 rounded hover:bg-gray-700"><FaTrash className="text-red-400" /></button></div></td></tr>))}{orderItems.length === 0 && (<tr><td colSpan={4} className="px-4 py-6 text-center text-sm text-gray-400">No items added yet.</td></tr>)}</tbody>
             </table>
           </div>
 
-          {/* Status + Submit */}
           <div className="mb-4 flex items-center justify-between">
             <div className="flex items-center gap-4">
-              <div>
-                <div className="text-sm text-gray-300 font-medium">Order Status</div>
-                <div className="text-xs text-gray-400">{isConfirmed ? "Confirmed" : "Unconfirmed"}</div>
-              </div>
-
-              <button type="button" role="switch" aria-checked={isConfirmed} onClick={() => setIsConfirmed((s) => !s)} className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors focus:outline-none ${isConfirmed ? "bg-green-500" : "bg-gray-600"}`}>
-                <span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${isConfirmed ? "translate-x-7" : "translate-x-1"}`} />
-              </button>
+              <div><div className="text-sm text-gray-300 font-medium">Order Status</div><div className="text-xs text-gray-400">{isConfirmed ? "Confirmed" : "Unconfirmed"}</div></div>
+              <button type="button" role="switch" aria-checked={isConfirmed} onClick={() => setIsConfirmed((s) => !s)} className={`relative inline-flex h-7 w-14 items-center rounded-full transition-colors focus:outline-none ${isConfirmed ? "bg-green-500" : "bg-gray-600"}`}><span className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${isConfirmed ? "translate-x-7" : "translate-x-1"}`} /></button>
             </div>
-
             <div className="text-sm text-gray-400">(This will be saved to the database as a string)</div>
           </div>
 
           <div className="flex justify-between mt-6">
-            <button type="button" onClick={() => setStep(1)} className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md">
-              Back
-            </button>
-
+            <button type="button" onClick={() => setStep(1)} className="bg-gray-600 hover:bg-gray-700 text-white font-bold py-2 px-4 rounded-md">Back</button>
             <button type="submit" disabled={isSubmitting || orderItems.length === 0} className={`flex items-center gap-2 ${isSubmitting ? "bg-blue-700" : "bg-blue-600 hover:bg-blue-700"} text-white font-bold py-2 px-4 rounded-md disabled:opacity-60`}>
-              {isSubmitting ? (
-                <svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24" aria-hidden>
-                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" />
-                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" />
-                </svg>
-              ) : null}
+              {isSubmitting ? (<svg className="animate-spin h-5 w-5 text-white" viewBox="0 0 24 24" aria-hidden><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z" /></svg>) : null}
               <span>{isSubmitting ? "" : "Create Order"}</span>
             </button>
           </div>
