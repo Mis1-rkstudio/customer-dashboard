@@ -163,8 +163,11 @@ export default function UserSwitcher(): React.JSX.Element {
     setLoadingCustomers(true);
 
     try {
-      const meta = ((user as unknown) as Record<string, unknown>)?.publicMetadata ?? {};
-      const raw = meta.customers ?? meta.assigned_customers ?? meta.assignedCustomers ?? [];
+      // Type-safe access to publicMetadata
+      const meta = ((user as unknown) as Record<string, unknown>)?.publicMetadata;
+      const raw = isRecord(meta)
+        ? meta["customers"] ?? meta["assigned_customers"] ?? meta["assignedCustomers"] ?? []
+        : [];
       const normalized = normalizeCustomersFromMeta(raw);
       const namesOnly = normalized.map((c) => c.name).filter(Boolean);
       setLocalCustomers(normalized);
