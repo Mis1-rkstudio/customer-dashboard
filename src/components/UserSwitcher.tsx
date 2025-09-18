@@ -1,4 +1,3 @@
-// src/components/UserSwitcher.tsx
 "use client";
 
 import * as React from "react";
@@ -19,27 +18,21 @@ import {
 } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { useUserStore } from "@/store/useUserStore";
+import { useUser } from "@clerk/nextjs";
 
-type InternalUser = {
-  row_id?: string | null;
-  name?: string | null;
-  email?: string | null;
-  customers?: string[] | { name: string; email: string }[] | null;
+type CustomerItem = {
+  id: string;
+  name: string;
+  email?: string;
 };
 
-type CustomerObj = { name: string; email: string };
+const LOCAL_KEY = "user_switcher_selection";
 
 /* --- helpers --- */
 function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
 
-function safeTrimString(v: unknown): string {
-  if (v === null || v === undefined) return "";
-  return String(v).trim();
-}
-
-/** Safely read a stringy property from unknown object */
 function getStringProp(obj: unknown, key: string): string | undefined {
   if (!isRecord(obj)) return undefined;
   const val = obj[key];
@@ -49,182 +42,249 @@ function getStringProp(obj: unknown, key: string): string | undefined {
   return undefined;
 }
 
+/** Normalize customers stored in publicMetadata into CustomerItem[]. */
+function normalizeCustomersFromMeta(raw: unknown): CustomerItem[] {
+  const out: CustomerItem[] = [];
+  if (!raw) return out;
+
+  if (typeof raw === "string") {
+    const arr = raw.split(",").map((s) => s.trim()).filter(Boolean);
+    for (let i = 0; i < arr.length; i++) out.push({ id: `customer:${arr[i]}:${i}`, name: arr[i] });
+    return out;
+  }
+
+  if (Array.isArray(raw)) {
+    let index = 0;
+    for (const entry of raw) {
+      if (!entry) {
+        index++;
+        continue;
+      }
+      if (typeof entry === "string") {
+        const s = entry.trim();
+        const name = s || `Customer ${index + 1}`;
+        out.push({ id: `customer:${name}:${index}`, name });
+        index++;
+        continue;
+      }
+      if (isRecord(entry)) {
+        const name =
+          getStringProp(entry, "name") ??
+          getStringProp(entry, "Name") ??
+          getStringProp(entry, "Company_Name") ??
+          getStringProp(entry, "company_name") ??
+          getStringProp(entry, "email") ??
+          getStringProp(entry, "Email") ??
+          `Customer ${index + 1}`;
+        const email = getStringProp(entry, "email") ?? getStringProp(entry, "Email") ?? undefined;
+        out.push({ id: `customer:${name}:${index}`, name: (name ?? "").trim(), email });
+        index++;
+        continue;
+      }
+      const s = String(entry).trim();
+      out.push({ id: `customer:${s || index}`, name: s || `Customer ${index + 1}` });
+      index++;
+    }
+    return out;
+  }
+
+  try {
+    const s = String(raw);
+    if (s) {
+      const arr = s.split(",").map((t) => t.trim()).filter(Boolean);
+      arr.forEach((a, i) => out.push({ id: `customer:${a}:${i}`, name: a }));
+    }
+  } catch {
+    // noop
+  }
+
+  return out;
+}
+
 export default function UserSwitcher(): React.JSX.Element {
   const [open, setOpen] = React.useState(false);
   const [query, setQuery] = React.useState("");
+
+  // store selectors
   const currentUserId = useUserStore((s) => s.currentUserId);
-  const currentUserEmail = useUserStore((s) => s.currentUserEmail);
-  const customersFromStore = useUserStore((s) => s.customers ?? []);
+  const currentUser = useUserStore((s) => s.currentUser);
   const setCurrentUser = useUserStore((s) => s.setCurrentUser);
-  const setCurrentUserId = useUserStore((s) => s.setCurrentUserId);
   const setCustomers = useUserStore((s) => s.setCustomers);
   const setLoadingCustomers = useUserStore((s) => s.setLoadingCustomers);
 
-  const [users, setUsers] = React.useState<InternalUser[]>([]);
-  const [loadingUsers, setLoadingUsers] = React.useState(false);
+  const { isLoaded, isSignedIn, user } = useUser();
 
-  // track whether we've already fetched customers at least once for the currently-signed-in user
-  const fetchedOnceRef = React.useRef(false);
+  const [customers, setLocalCustomers] = React.useState<CustomerItem[]>([]);
+  const [loading, setLoading] = React.useState(false);
 
+  // Derive logged-in user's primary email safely
+  const loggedInEmail = React.useMemo(() => {
+    if (!user) return undefined;
+    const maybePrimary = (user as unknown) as Record<string, unknown>;
+    const primaryEmailObj = maybePrimary.primaryEmailAddress;
+    if (isRecord(primaryEmailObj) && typeof primaryEmailObj.emailAddress === "string") {
+      return primaryEmailObj.emailAddress.trim();
+    }
+    const emails = (maybePrimary.emailAddresses as unknown) as unknown[] | undefined;
+    if (Array.isArray(emails) && emails.length > 0) {
+      const first = emails[0] as Record<string, unknown> | undefined;
+      if (first && typeof first.emailAddress === "string") return first.emailAddress.trim();
+    }
+    if (typeof maybePrimary.email === "string") return maybePrimary.email.trim();
+    return undefined;
+  }, [user]);
+
+  // Build a stable "me" id for the logged-in user
+  const meId = React.useMemo(() => {
+    const maybe = (user as unknown) as Record<string, unknown> | undefined;
+    const uid = (maybe && typeof maybe.id === "string" && maybe.id) ?? "me";
+    return `me:${uid}`;
+  }, [user]);
+
+  // populate customers from Clerk user's publicMetadata when popover opens or user changes
   React.useEffect(() => {
-    (async () => {
-      setLoadingUsers(true);
-      try {
-        const res = await fetch("/api/internal_users");
-        if (!res.ok) {
-          setUsers([]);
-          return;
-        }
-        const json = await res.json();
-        if (json?.ok && Array.isArray(json.data)) {
-          setUsers(json.data as InternalUser[]);
-        } else {
-          setUsers([]);
-        }
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error("fetch internal users", err);
-        setUsers([]);
-      } finally {
-        setLoadingUsers(false);
-      }
-    })();
-  }, []);
+    if (!open) return;
 
-  // Build stable items array with unique ids (prefer row_id)
-  const items = React.useMemo(() => {
-    return users.map((u, idx) => {
-      const id = u.row_id ?? `internal_user_fallback_${idx}`;
-      const label = u.name ?? u.email ?? "Unnamed";
-      return { id, label, email: u.email ?? null };
-    });
-  }, [users]);
-
-  const visible = React.useMemo(() => {
-    if (!query) return items;
-    const q = query.toLowerCase();
-    return items.filter(
-      (it) =>
-        it.label.toLowerCase().includes(q) ||
-        (it.email ?? "").toLowerCase().includes(q)
-    );
-  }, [items, query]);
-
-  // Fetch customers only once when a currentUserEmail becomes available (e.g. at login).
-  // Do not re-fetch on dropdown selection changes.
-  React.useEffect(() => {
-    const email = currentUserEmail?.trim() ?? "";
-    if (!email) return;
-
-    // If we've already fetched once and store already has customers, do nothing.
-    if (
-      fetchedOnceRef.current &&
-      customersFromStore &&
-      customersFromStore.length > 0
-    ) {
+    if (!isLoaded) {
+      setLoading(true);
+      setLoadingCustomers(true);
       return;
     }
 
-    // fetch customers for this email
-    let cancelled = false;
-    (async () => {
-      setLoadingCustomers(true);
-      try {
-        const res = await fetch(
-          `/api/internal_users?email=${encodeURIComponent(email)}`
-        );
-        if (!res.ok) {
-          if (!cancelled) setCustomers([]);
-          return;
-        }
-        const json = await res.json();
-        if (json?.ok && json?.user) {
-          // server may return customers as array of strings or array of objects
-          const raw = json.user.customers ?? [];
-          const normalized: CustomerObj[] = [];
+    if (!isSignedIn || !user) {
+      setLocalCustomers([]);
+      setCustomers([]);
+      setLoading(false);
+      setLoadingCustomers(false);
+      return;
+    }
 
-          if (Array.isArray(raw)) {
-            for (const entry of raw) {
-              if (!entry) continue;
+    setLoading(true);
+    setLoadingCustomers(true);
 
-              if (typeof entry === "string") {
-                const e = String(entry).trim();
-                normalized.push({ name: e, email: e });
-                continue;
-              }
+    try {
+      const meta = ((user as unknown) as Record<string, unknown>)?.publicMetadata ?? {};
+      const raw = meta.customers ?? meta.assigned_customers ?? meta.assignedCustomers ?? [];
+      const normalized = normalizeCustomersFromMeta(raw);
+      const namesOnly = normalized.map((c) => c.name).filter(Boolean);
+      setLocalCustomers(normalized);
+      setCustomers(namesOnly);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("Failed to read customers from publicMetadata", err);
+      setLocalCustomers([]);
+      setCustomers([]);
+    } finally {
+      setLoading(false);
+      setLoadingCustomers(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, isLoaded, isSignedIn, user]);
 
-              if (isRecord(entry)) {
-                // prefer email/name fields if present
-                const em = getStringProp(entry, "email") ?? getStringProp(entry, "Email") ?? "";
-                const nm = getStringProp(entry, "name") ?? getStringProp(entry, "Name") ?? em ?? "";
-                normalized.push({
-                  name: (nm ?? "").trim(),
-                  email: (em ?? "").trim(),
-                });
-                continue;
-              }
+  // restore selection from localStorage or preselect "You"
+  React.useEffect(() => {
+    if (!isLoaded) return;
 
-              // fallback: coerce to string
-              const s = String(entry).trim();
-              normalized.push({ name: s, email: s });
-            }
-          }
+    try {
+      const stored = typeof window !== "undefined" ? window.localStorage.getItem(LOCAL_KEY) : null;
 
-          if (!cancelled) {
-            // ---------- IMPORTANT: store expects string[]; convert objects to string identifiers ----------
-            // prefer email when present, otherwise fallback to name; filter out empties
-            const normalizedStrings = normalized
-              .map((c) => (c.email && String(c.email).trim() ? String(c.email).trim() : String(c.name ?? "").trim()))
-              .filter(Boolean);
-
-            setCustomers(normalizedStrings);
-            fetchedOnceRef.current = true;
+      if (stored) {
+        if (stored.startsWith("me:")) {
+          if (stored === meId && loggedInEmail) {
+            // use two-arg API so store has both display and id
+            setCurrentUser(loggedInEmail, stored);
+            return;
           }
         } else {
-          if (!cancelled) setCustomers([]);
+          // stored is customer id; set display to stripped name and pass id
+          const display = stored.replace(/^customer:/, "").split(":")[0] ?? stored;
+          setCurrentUser(display, stored);
+          return;
         }
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error("fetch user customers (initial)", err);
-        if (!cancelled) setCustomers([]);
-      } finally {
-        if (!cancelled) setLoadingCustomers(false);
       }
-    })();
 
-    return () => {
-      // mark cancellation to ignore late results
-      cancelled = true;
-    };
-    // We intentionally depend on currentUserEmail only. fetchedOnceRef prevents repeated fetches.
+      // No stored selection => preselect "You" if signed in
+      if (isSignedIn && loggedInEmail) {
+        setCurrentUser(loggedInEmail, meId);
+        try {
+          window.localStorage.setItem(LOCAL_KEY, meId);
+        } catch {
+          /* ignore storage failures */
+        }
+      }
+    } catch {
+      // ignore localStorage errors
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentUserEmail]);
+  }, [isLoaded, isSignedIn, loggedInEmail, meId, setCurrentUser]);
 
-  // onSelect: only update the store (do NOT re-fetch customers)
-  const onSelectById = React.useCallback(
+  // filtered/visible customers for the Command list (search by name only)
+  const visibleCustomers = React.useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return customers;
+    return customers.filter((c) => c.name.toLowerCase().includes(q));
+  }, [customers, query]);
+
+  // selection handler — use setCurrentUser(display, id) everywhere
+  const onSelect = React.useCallback(
     (id: string | null) => {
-      const selected = id ? items.find((x) => x.id === id) ?? null : null;
-      const email = selected?.email ?? null;
+      if (!id) {
+        setCurrentUser(null, null);
+        if (typeof window !== "undefined") window.localStorage.removeItem(LOCAL_KEY);
+        setOpen(false);
+        return;
+      }
 
-      setCurrentUserId(id ?? null);
-      setCurrentUser(email);
+      if (id.startsWith("me:")) {
+        const label = loggedInEmail ?? "You";
+        setCurrentUser(label, id);
+        try {
+          if (typeof window !== "undefined") window.localStorage.setItem(LOCAL_KEY, id);
+        } catch {
+          /* ignore */
+        }
+        setOpen(false);
+        return;
+      }
 
-      // DO NOT fetch customers here — customers were loaded once at login / initial user load.
-      // Keep existing customers in the store unchanged.
+      const selected = customers.find((c) => c.id === id) ?? null;
+      const emailOrName = selected ? (selected.email && selected.email.length ? selected.email : selected.name) : null;
+
+      if (emailOrName) {
+        setCurrentUser(emailOrName, id);
+        try {
+          if (typeof window !== "undefined") window.localStorage.setItem(LOCAL_KEY, id);
+        } catch {
+          /* ignore */
+        }
+      } else {
+        // fallback: set id and null display (store will reflect id)
+        setCurrentUser(null, id);
+        try {
+          if (typeof window !== "undefined") window.localStorage.setItem(LOCAL_KEY, id);
+        } catch {
+          /* ignore */
+        }
+      }
+      setOpen(false);
     },
-    [items, setCurrentUser, setCurrentUserId]
+    [customers, loggedInEmail, setCurrentUser]
   );
+
+  // button label prefers the strong store value
+  const buttonLabel = (currentUser && String(currentUser).trim()) || loggedInEmail || "Switch customer";
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
           variant="default"
-          className="w-[320px] justify-between"
-          disabled={loadingUsers}
+          className="w-[320px] justify-between truncate"
+          disabled={loading}
+          aria-label="Open customer switcher"
+          title={buttonLabel}
         >
-          {/* display email from store (keeps UI same) */}
-          {useUserStore.getState().currentUserEmail ?? "Switch user"}
+          <span className="truncate text-sm">{buttonLabel}</span>
           <ChevronsUpDown className="opacity-50" />
         </Button>
       </PopoverTrigger>
@@ -232,42 +292,78 @@ export default function UserSwitcher(): React.JSX.Element {
       <PopoverContent className="w-[320px] p-0 !z-50 bg-white dark:bg-slate-900/95 backdrop-blur-sm border border-slate-800 dark:border-slate-700 shadow-lg rounded-md">
         <Command>
           <CommandInput
-            placeholder="Search user by name or email..."
+            placeholder={loading ? "Loading customers..." : "Search customers by name..."}
             className="h-9"
             value={query}
             onValueChange={(v: string) => setQuery(v)}
           />
           <CommandList className="min-h-[120px] max-h-[360px] overflow-auto">
-            <CommandEmpty>No user found.</CommandEmpty>
-            <CommandGroup>
-              {visible.map((it) => (
-                <CommandItem
-                  key={it.id}
-                  value={it.id}
-                  onSelect={(val: string) => {
-                    onSelectById(val);
-                    setOpen(false);
-                  }}
-                  className="group"
-                >
-                  <div className="flex flex-col">
-                    <span className="text-sm text-slate-900 dark:text-slate-100">
-                      {it.label}
-                    </span>
-                    <span className="text-xs text-slate-500 dark:text-slate-400">
-                      {it.email}
-                    </span>
-                  </div>
+            {loading ? (
+              <div className="p-4 text-sm text-gray-400">Loading customers…</div>
+            ) : (
+              <>
+                {/* "You" entry */}
+                <CommandGroup>
+                  <CommandItem
+                    key={meId}
+                    value={meId}
+                    onSelect={(val: string) => onSelect(val)}
+                    className="group"
+                  >
+                    <div className="flex items-center gap-2 w-full">
+                      <div className="min-w-0">
+                        <div className="text-sm text-slate-900 dark:text-slate-100">
+                          {loggedInEmail ? `You — ${loggedInEmail}` : "You"}
+                        </div>
+                        <div className="text-xs text-slate-500 dark:text-slate-400">
+                          View your own orders
+                        </div>
+                      </div>
 
-                  <Check
-                    className={cn(
-                      "ml-auto",
-                      currentUserId === it.id ? "opacity-100" : "opacity-0"
-                    )}
-                  />
-                </CommandItem>
-              ))}
-            </CommandGroup>
+                      <Check
+                        className={cn(
+                          "ml-auto",
+                          currentUserId === meId ? "opacity-100" : "opacity-0"
+                        )}
+                      />
+                    </div>
+                  </CommandItem>
+                </CommandGroup>
+
+                <div className="border-t border-slate-200 dark:border-slate-700 my-2 mx-3" />
+
+                {/* Customer list (or empty state) */}
+                {customers.length === 0 ? (
+                  <CommandEmpty>No customers found for this user.</CommandEmpty>
+                ) : (
+                  <CommandGroup>
+                    {visibleCustomers.map((it) => (
+                      <CommandItem
+                        key={it.id}
+                        value={it.id}
+                        onSelect={(val: string) => onSelect(val)}
+                        className="group"
+                      >
+                        <div className="flex items-center gap-2 w-full">
+                          <div className="min-w-0">
+                            <div className="text-sm text-slate-900 dark:text-slate-100">
+                              {it.name}
+                            </div>
+                          </div>
+
+                          <Check
+                            className={cn(
+                              "ml-auto",
+                              currentUserId === it.id ? "opacity-100" : "opacity-0"
+                            )}
+                          />
+                        </div>
+                      </CommandItem>
+                    ))}
+                  </CommandGroup>
+                )}
+              </>
+            )}
           </CommandList>
         </Command>
       </PopoverContent>

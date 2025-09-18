@@ -303,7 +303,6 @@ export default function ClientCarouselWrapper({
 
         if (!cancelled) setItems(normalized);
       } catch (err) {
-        // eslint-disable-next-line no-console
         console.error("Failed to fetch items", err);
         if (!cancelled) {
           setError("Failed to load items");

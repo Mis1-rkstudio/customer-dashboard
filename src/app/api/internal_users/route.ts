@@ -1,3 +1,4 @@
+// app/api/internal_users/route.ts
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
 import { BigQuery } from "@google-cloud/bigquery";
@@ -133,43 +134,122 @@ function normalizeInput(body: Record<string, unknown> | null): Partial<InternalU
   };
 }
 
-/** Parse different shapes into string[] (used when reading from DB or parsing input) */
+/* ---------------------- Customer parsing helpers ---------------------- */
+
+/** Helper: isRecord */
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null;
+}
+
+/** Safely read a string-ish field from an object using multiple candidate keys */
+function readStringField(obj: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = obj[k];
+    if (typeof v === "string" && v.trim().length > 0) return v.trim();
+    if (typeof v === "number") return String(v);
+  }
+  return undefined;
+}
+
+/** Parse different shapes into string[] (used when reading from DB or parsing input)
+ *
+ * Supported:
+ * - ["a@x.com", "b@x.com"]
+ * - [{ name, email }, ...]
+ * - [{ "Company Name": "email@..." }, ...] (value extracted)
+ * - JSON-string encoded array
+ * - CSV string "a,b,c"
+ */
 function parseCustomers(raw: unknown): string[] {
   if (!raw) return [];
+
+  // If raw is an array, process each entry
   if (Array.isArray(raw)) {
-    return raw.map(String).map((s) => s.trim()).filter(Boolean);
+    const out: string[] = [];
+    for (const entry of raw) {
+      if (entry === null || entry === undefined) continue;
+
+      if (typeof entry === "string") {
+        const s = entry.trim();
+        if (s) out.push(s);
+        continue;
+      }
+
+      if (isRecord(entry)) {
+        // Prefer email fields
+        const email = readStringField(entry as Record<string, unknown>, "email", "Email");
+        if (email) {
+          out.push(email);
+          continue;
+        }
+
+        // Otherwise prefer name-like fields
+        const name = readStringField(entry as Record<string, unknown>, "name", "Name", "Company_Name", "company_name");
+        if (name) {
+          out.push(name);
+          continue;
+        }
+
+        // If object is shape { "Customer Name": "email@..." } take the first value
+        const keys = Object.keys(entry as Record<string, unknown>);
+        if (keys.length > 0) {
+          for (const k of keys) {
+            const val = (entry as Record<string, unknown>)[k];
+            if (typeof val === "string") {
+              const s = val.trim();
+              if (s) {
+                out.push(s);
+                break;
+              }
+            } else if (typeof val === "number") {
+              out.push(String(val));
+              break;
+            }
+          }
+        }
+
+        continue;
+      }
+
+      // fallback: stringify
+      const s = String(entry).trim();
+      if (s) out.push(s);
+    }
+    return out.map((x) => x.trim()).filter(Boolean);
   }
 
-  if (typeof raw === "object" && raw !== null) {
+  // If raw is an object that serializes to array (rare), attempt to parse
+  if (isRecord(raw)) {
     try {
       const json = JSON.stringify(raw);
       const parsed = JSON.parse(json);
-      if (Array.isArray(parsed)) return parsed.map(String).map((s) => s.trim()).filter(Boolean);
+      if (Array.isArray(parsed)) return parseCustomers(parsed);
     } catch {
       // fall through
     }
   }
 
+  // If raw is a string, attempt JSON parse, CSV, or single value
   if (typeof raw === "string") {
     const s = raw.trim();
     if (!s) return [];
-    // JSON array?
+    // JSON encoded array?
     if ((s.startsWith("[") && s.endsWith("]")) || s.startsWith('"')) {
       try {
         const parsed = JSON.parse(s);
-        if (Array.isArray(parsed)) {
-          return parsed.map(String).map((x) => x.trim()).filter(Boolean);
-        }
+        if (Array.isArray(parsed)) return parseCustomers(parsed);
       } catch {
         // not JSON
       }
     }
+    // CSV
     if (s.includes(",")) {
       return s.split(",").map((p) => p.trim()).filter(Boolean);
     }
     return [s];
   }
 
+  // fallback convert to string
   return [String(raw)].map((x) => x.trim()).filter(Boolean);
 }
 
@@ -184,17 +264,30 @@ function stringifyCustomersForDb(raw: unknown): string | null {
   }
 }
 
-/** Helper to extract & parse customers from a row returned by BigQuery (which stores as STRING) */
+/** Extract customers column value from a DB row and parse it into string[] */
 function extractCustomersFromDbRow(row: Record<string, unknown>): string[] {
   const raw = row["customers"];
   return parseCustomers(raw);
 }
 
-/**
- * GET - reads from the view (internal_users_current) so callers always get the latest non-deleted row.
- *  - /api/internal_users -> { ok: true, data: [...] }
- *  - /api/internal_users?email=someone -> { ok: true, user: {...} }
- */
+/** Dedupe array preserving order, case-insensitively */
+function dedupePreserveOrder(items: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const it of items) {
+    const key = String(it ?? "").trim();
+    if (!key) continue;
+    const lower = key.toLowerCase();
+    if (!seen.has(lower)) {
+      seen.add(lower);
+      out.push(key);
+    }
+  }
+  return out;
+}
+
+/* ---------------------- GET ---------------------- */
+
 export async function GET(req: NextRequest): Promise<NextResponse> {
   try {
     const bigquery = getBigQueryClient();
@@ -204,7 +297,7 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     const emailQ = (url.searchParams.get("email") ?? "").trim();
 
     if (emailQ) {
-      // read from the view (should already return the latest non-deleted row)
+      // read the latest non-deleted row for the email
       const sqlSingle = `
         SELECT row_id, name, number, email, department, created_at, updated_at, is_deleted, customers
         FROM \`${VIEW}\`
@@ -218,22 +311,18 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         return NextResponse.json({ ok: false, error: "not_found" }, { status: 404 });
       }
 
-      // --- NEW: enrich customers into objects [{name,email}, ...] ---
+      // enrich customers: parse stored string[] then lookup names for those emails
       const customerEmails = extractCustomersFromDbRow(row).map((e) => String(e).trim()).filter(Boolean);
       let customersDetailed: CustomerObj[] = [];
 
       if (customerEmails.length > 0) {
         try {
-          // Lowercase emails for case-insensitive matching
           const emailsLower = customerEmails.map((e) => e.toLowerCase());
-
-          // Lookup names for those emails in the view (or base table). We query the view so we get the "current" row for each email.
           const sqlLookup = `
             SELECT name, email
             FROM \`${VIEW}\`
             WHERE LOWER(email) IN UNNEST(@emails)
           `;
-          // Pass array param - BigQuery node client will accept JS array here
           const [lookupRows] = await bigquery.query({
             query: sqlLookup,
             params: { emails: emailsLower },
@@ -251,14 +340,12 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
             }
           }
 
-          // preserve the original customerEmails order, map to objects, fallback name -> email
           customersDetailed = customerEmails.map((em) => {
             const lower = em.toLowerCase();
             const foundName = nameByEmailLower.get(lower);
             return { name: foundName && String(foundName).trim() ? String(foundName).trim() : em, email: em };
           });
         } catch (lookupErr: unknown) {
-          // On any lookup error, fallback to email-as-name
           console.error("customer lookup error:", getErrorMessage(lookupErr));
           customersDetailed = customerEmails.map((em) => ({ name: em, email: em }));
         }
@@ -273,12 +360,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
         created_at: typeof row["created_at"] === "string" ? row["created_at"] : null,
         updated_at: typeof row["updated_at"] === "string" ? row["updated_at"] : null,
         is_deleted: typeof row["is_deleted"] === "boolean" ? row["is_deleted"] : false,
-        // legacy raw parsed list (string[]). we keep for compatibility if someone expects just emails
+        // legacy raw parsed list (string[])
         customers: extractCustomersFromDbRow(row),
         __customers_for_db: row["customers"] ? String(row["customers"]) : null,
       };
 
-      // Return enriched detailed customers in `user.customers` (object[]). This is the response your frontend expects.
       return NextResponse.json(
         {
           ok: true,
@@ -316,14 +402,11 @@ export async function GET(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ ok: true, data }, { status: 200 });
   } catch (err: unknown) {
     console.error("GET /api/internal_users error:", getErrorMessage(err));
-    return NextResponse.json(
-      { ok: false, error: getErrorMessage(err) },
-      { status: 500 }
-    );
+    return NextResponse.json({ ok: false, error: getErrorMessage(err) }, { status: 500 });
   }
 }
 
-/* ---------------------- POST (unchanged, typed safely) ---------------------- */
+/* ---------------------- POST ---------------------- */
 
 /**
  * POST - insert (append) one user
@@ -451,12 +534,31 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
       return NextResponse.json({ ok: false, error: "row_id or email is required to identify the row to update." }, { status: 400 });
     }
 
-    // merge values: use provided inputs when present, otherwise keep existing values
-    const incomingCustomersForDb = stringifyCustomersForDb((raw?.customers ?? raw?.Customers) as unknown);
+    // ------------------ merge/append customers (new behavior) ------------------
+    // We want to append incoming customers to existing customers (no replace),
+    // dedupe case-insensitively, and store as a JSON string in the "customers" column.
+    const hasIncomingCustomers =
+      raw && (Object.prototype.hasOwnProperty.call(raw, "customers") || Object.prototype.hasOwnProperty.call(raw, "Customers"));
+
+    // parse existing customers (array of strings)
     const existingCustomersArr = extractCustomersFromDbRow(existing);
     const existingCustomersForDb = existing["customers"] ? String(existing["customers"]) : null;
-    // if incomingCustomersForDb is explicitly null then we'll set null; if undefined, keep existing
-    const customersForDb = typeof incomingCustomersForDb !== "undefined" ? incomingCustomersForDb : existingCustomersForDb;
+
+    let customersForDb: string | null = existingCustomersForDb;
+
+    if (hasIncomingCustomers) {
+      // parse incoming payload into string[] (supports all shapes)
+      const incomingArr = parseCustomers((raw?.customers ?? raw?.Customers) as unknown);
+
+      // append preserving order, then dedupe (preserve first seen)
+      const merged = dedupePreserveOrder(existingCustomersArr.concat(incomingArr));
+
+      customersForDb = merged.length ? JSON.stringify(merged) : null;
+    } else {
+      // no incoming customers provided => keep existing value unchanged
+      customersForDb = existingCustomersForDb;
+    }
+    // --------------------------------------------------------------------------
 
     const now = new Date().toISOString();
 
@@ -508,13 +610,6 @@ export async function PUT(req: NextRequest): Promise<NextResponse> {
 
 /* ---------------------- DELETE (append tombstone row) ---------------------- */
 
-/**
- * DELETE - append a tombstone row with is_deleted = TRUE.
- * - Prefer row_id (query or body) to target a single row (still appends a tombstone).
- * - Else if email provided: append a tombstone row for that email.
- *
- * This avoids running a DML DELETE (which fails during streaming buffer).
- */
 export async function DELETE(req: NextRequest): Promise<NextResponse> {
   try {
     const url = new URL(req.url);
@@ -542,7 +637,6 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
 
     if (rowId) {
       // Append tombstone row for the same email (lookup email first to preserve email in tombstone)
-      // We'll try to fetch the target row's email to include in tombstone
       const fetchSql = `
         SELECT row_id, email FROM \`${PROJECT_ID}.${DATASET}.${TABLE}\` WHERE row_id = @rid LIMIT 1
       `;
@@ -578,7 +672,6 @@ export async function DELETE(req: NextRequest): Promise<NextResponse> {
       );
     }
 
-    // Append tombstone row for the provided email
     const tombstoneByEmail: Record<string, unknown> = {
       row_id: generateRowId(),
       name: null,

@@ -107,7 +107,6 @@ export default function useSyncUser(): void {
         }
       } catch (err) {
         if (!cancelled) {
-          // eslint-disable-next-line no-console
           console.error("fetch user by email error", err);
           setCustomers([]);
         }

@@ -1,4 +1,3 @@
-// app/(pages)/orders/page.tsx
 "use client";
 
 import React, { JSX, useCallback, useEffect, useMemo, useState } from "react";
@@ -283,13 +282,14 @@ function normalizeOrderShape(raw: unknown): NormalizedOrder {
 export default function OrdersPage(): JSX.Element {
   const { user } = useUser();
 
-  // small permissive shape for the Clerk user object fields we use
   type ClerkUserLite = {
     primaryEmailAddress?: { emailAddress?: string };
     emailAddresses?: Array<{ emailAddress?: string }>;
     publicMetadata?: Record<string, unknown>;
     primaryPhoneNumber?: { phoneNumber?: string };
     phoneNumbers?: Array<{ phoneNumber?: string }>;
+    id?: string;
+    email?: string;
   };
 
   const typedUser = user as unknown as ClerkUserLite | undefined;
@@ -297,13 +297,14 @@ export default function OrdersPage(): JSX.Element {
   const primaryEmailAddress =
     typedUser?.primaryEmailAddress?.emailAddress ??
     typedUser?.emailAddresses?.[0]?.emailAddress ??
+    typedUser?.email ??
     undefined;
 
-  // read active user selection from global store
+  // read active user selection from global store (CURRENT change)
+  const currentUser = useUserStore((s) => s.currentUser); // active selection (name or email)
   const currentUserId = useUserStore((s) => s.currentUserId);
   const currentUserEmail = useUserStore((s) => s.currentUserEmail);
 
-  // isAdmin flag used to show/hide the Create button/modal and some admin logic
   const isAdmin = Boolean(
     typedUser?.publicMetadata &&
       String(typedUser.publicMetadata.role ?? "").toLowerCase() === "admin"
@@ -315,7 +316,6 @@ export default function OrdersPage(): JSX.Element {
   // Local input state (search textbox)
   const [searchQuery, setSearchQuery] = useState<string>("");
 
-  // Use nuqs to persist query params:
   const [qParam, setQParam] = useQueryState("q") as [
     string | null,
     (v: string | null) => void
@@ -329,12 +329,10 @@ export default function OrdersPage(): JSX.Element {
     (v: string | null) => void
   ];
 
-  // search pills local state (array of {field, value})
   const [searchPills, setSearchPills] = useState<
     Array<{ field: string; value: string }>
   >([]);
 
-  // active tab state (keep synced with tabParam)
   const [selectedTab, setSelectedTab] = useState<
     "all" | "active" | "cancelled"
   >(
@@ -351,15 +349,12 @@ export default function OrdersPage(): JSX.Element {
 
   const [isCreateModalOpen, setICreateModalOpen] = useState<boolean>(false);
 
-  /* -------------------- Sync URL params -> local on mount -------------------- */
   useEffect(() => {
     if (qParam !== null && typeof qParam === "string") {
       setSearchQuery(qParam);
     } else {
       setSearchQuery("");
     }
-    // only on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -367,7 +362,6 @@ export default function OrdersPage(): JSX.Element {
       try {
         const parsed = JSON.parse(pillsParam);
         if (Array.isArray(parsed)) {
-          // validate shape
           const arr = parsed
             .filter(
               (x) =>
@@ -388,8 +382,6 @@ export default function OrdersPage(): JSX.Element {
       }
     }
     setSearchPills([]);
-    // only on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -399,15 +391,10 @@ export default function OrdersPage(): JSX.Element {
         setSelectedTab(v as "active" | "cancelled");
       else setSelectedTab("all");
     }
-    // only on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  /* -------------------- Sync local -> URL params when things change -------------------- */
 
   useEffect(() => {
     if (!searchPills || searchPills.length === 0) {
-      // remove param
       setPillsParam(null);
       return;
     }
@@ -416,23 +403,19 @@ export default function OrdersPage(): JSX.Element {
     } catch {
       // fallback: don't update
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchPills]);
+  }, [searchPills, setPillsParam]);
 
   useEffect(() => {
     setTabParam(selectedTab);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTab]);
+  }, [selectedTab, setTabParam]);
 
   useEffect(() => {
-    // If searchQuery is empty remove q param; if not set q param
     if (!searchQuery) {
       setQParam(null);
     } else {
       setQParam(searchQuery);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchQuery]);
+  }, [searchQuery, setQParam]);
 
   /* ---------------------- fetchOrders and filter logic (uses store current user) ---------------------- */
 
@@ -440,19 +423,17 @@ export default function OrdersPage(): JSX.Element {
     setIsLoading(true);
     setFetchError("");
     try {
-      const isAdmin = Boolean(
-        typedUser?.publicMetadata &&
-          String(typedUser.publicMetadata.role ?? "").toLowerCase() === "admin"
-      );
+      // logged-in user's primary email (used as order_placed_by)
+      const loggedInEmail = String(primaryEmailAddress ?? "")
+        .trim()
+        .toLowerCase();
 
-      // non-admin must have an active user selected in the store
-      if (!isAdmin && !currentUserId && !currentUserEmail) {
+      if (!loggedInEmail) {
         setOrders([]);
         setIsLoading(false);
         return;
       }
 
-      // fetch all orders from server (server-side filtering could be added later)
       const res = await fetch("/api/orders");
       if (!res.ok) {
         const txt = await res.text().catch(() => "");
@@ -460,7 +441,6 @@ export default function OrdersPage(): JSX.Element {
       }
       const data = await res.json().catch(() => null);
 
-      // normalize server shapes into an array
       let rawList: unknown[] = [];
       if (Array.isArray(data)) rawList = data;
       else if (
@@ -549,7 +529,6 @@ export default function OrdersPage(): JSX.Element {
         return base;
       });
 
-      // helper: robustly extract order_placed_by (many possible shapes)
       const extractOrderPlacedBy = (raw?: unknown): string => {
         if (!raw || typeof raw !== "object") return "";
         const rec = raw as Record<string, unknown>;
@@ -564,7 +543,6 @@ export default function OrdersPage(): JSX.Element {
           rec.orderPlacedByEmail,
           rec.order_placed_by_email,
           rec.orderPlacedBy_Email,
-          // if payload exists, prefer payload.order_placed_by or payload.orderPlacedBy
           (rec.payload &&
             (rec.payload as Record<string, unknown>).order_placed_by) ??
             undefined,
@@ -580,7 +558,6 @@ export default function OrdersPage(): JSX.Element {
           }
         }
 
-        // last resort: look inside payload JSON string if present
         if (typeof rec.payload === "string" && rec.payload) {
           try {
             const p = JSON.parse(rec.payload);
@@ -598,151 +575,36 @@ export default function OrdersPage(): JSX.Element {
         return "";
       };
 
-      const adminEmail = String(primaryEmailAddress ?? "")
-        .trim()
-        .toLowerCase();
-      const selectedEmail = String(currentUserEmail ?? "")
-        .trim()
-        .toLowerCase();
+      // Primary filter: orders placed by the currently-logged-in user
+      const placedByNeedle = loggedInEmail;
 
-      // If logged-in user is admin -> apply admin rules you specified
-      if (isAdmin) {
-        // must have admin email
-        if (!adminEmail) {
-          setOrders([]);
-          setIsLoading(false);
-          return;
-        }
+      // Active selection details from store
+      const activeSelectionRaw = currentUser ?? "";
+      const activeSelection = String(activeSelectionRaw).trim().toLowerCase(); // customer name OR email-like label
+      const activeSelectionEmail = String(currentUserEmail ?? "").trim().toLowerCase();
+      const activeSelectionId = String(currentUserId ?? "");
 
-        // if store user is empty OR equals admin -> show orders placed by admin
-        if (!selectedEmail || selectedEmail === adminEmail) {
-          const filtered = normalized.filter((o) => {
-            const placedBy = extractOrderPlacedBy(o.raw ?? o) || "";
-            return placedBy === adminEmail;
-          });
-          setOrders(filtered);
-          setIsLoading(false);
-          return;
-        }
-
-        // admin selected a different user: show orders placed by admin for that customer
-        const filtered = normalized.filter((o) => {
-          const placedBy = extractOrderPlacedBy(o.raw ?? o) || "";
-          const custEmail = String(o.customerEmail ?? "")
-            .trim()
-            .toLowerCase();
-          return placedBy === adminEmail && custEmail === selectedEmail;
-        });
-
-        setOrders(filtered);
-        setIsLoading(false);
-        return;
-      }
-
-      // Non-admin behavior:
-      // If the store email equals logged-in email -> only show orders where order_placed_by == logged-in email
-      if (
-        currentUserEmail &&
-        primaryEmailAddress &&
-        currentUserEmail.trim().toLowerCase() ===
-          String(primaryEmailAddress).trim().toLowerCase()
-      ) {
-        const needle = String(primaryEmailAddress).trim().toLowerCase();
-        const filtered = normalized.filter((o) => {
-          const placedBy = extractOrderPlacedBy(o.raw ?? o) || "";
-          return placedBy === needle;
-        });
-        setOrders(filtered);
-        setIsLoading(false);
-        return;
-      }
-
-      // Otherwise fall back to previous strict filtering by selected user's email/id/phone
-      const needleEmail = (currentUserEmail ?? "").trim().toLowerCase();
-      const needleUserId = currentUserId ?? "";
-
-      const onlyDigits = (s?: unknown) => String(s ?? "").replace(/\D/g, "");
-
-      const extractPossibleEmailsFromRaw = (raw?: unknown): string[] => {
-        if (!raw || typeof raw !== "object") return [];
-        const rec = raw as Record<string, unknown>;
-        const candidates = [
-          (rec.customer as Record<string, unknown> | undefined)?.email,
-          rec.customerEmail,
-          rec.customer_email,
-          rec.email,
-          rec.Email,
-        ];
-        return candidates
-          .filter(Boolean)
-          .map((c) => String(c).trim().toLowerCase())
-          .filter(Boolean);
-      };
-
-      const extractPossiblePhonesFromRaw = (raw?: unknown): string[] => {
-        if (!raw || typeof raw !== "object") return [];
-        const rec = raw as Record<string, unknown>;
-        const candidates = [
-          (rec.customer as Record<string, unknown> | undefined)?.phone,
-          (rec.customer as Record<string, unknown> | undefined)?.Number,
-          rec.customerPhone,
-          rec.customer_number,
-          rec.phone,
-          rec.Phone,
-          rec.Contact_Number,
-          (rec.agent && (rec.agent as Record<string, unknown>).number) ??
-            undefined,
-        ];
-        return candidates.map((p) => onlyDigits(p)).filter(Boolean);
-      };
-
-      const matchesUserIdInRaw = (raw?: unknown, id?: string): boolean => {
-        if (!id || !raw || typeof raw !== "object") return false;
-        const rec = raw as Record<string, unknown>;
-        const candidates = [
-          rec.userId,
-          rec.user_id,
-          rec.customerId,
-          rec.customer_id,
-          rec.agentId,
-          rec.agent_id,
-          rec.ownerId,
-          rec.owner_id,
-          rec.createdBy,
-          rec.created_by,
-          rec.row_id,
-        ];
-        return candidates.some((c) => c !== undefined && String(c) === id);
-      };
-
-      const filtered = normalized.filter((o) => {
-        // match by email if we have one
-        if (needleEmail) {
-          if (
-            o.customerEmail &&
-            String(o.customerEmail).trim().toLowerCase() === needleEmail
-          )
-            return true;
-          const rawEmails = extractPossibleEmailsFromRaw(o.raw);
-          if (rawEmails.some((e) => e === needleEmail)) return true;
-        }
-
-        // match by user id if we have one (strongest)
-        if (needleUserId && matchesUserIdInRaw(o.raw, needleUserId))
-          return true;
-
-        // match phone (fallback)
-        const needlePhone = "";
-        if (needlePhone) {
-          const orderPhones: string[] = [];
-          if (o.customerPhone) orderPhones.push(onlyDigits(o.customerPhone));
-          orderPhones.push(...extractPossiblePhonesFromRaw(o.raw));
-          if (orderPhones.some((p) => p === onlyDigits(needlePhone)))
-            return true;
-        }
-
-        return false;
+      // First, restrict to orders placed by the logged-in user (order_placed_by)
+      let filtered = normalized.filter((o) => {
+        const placedBy = extractOrderPlacedBy(o.raw ?? o) || "";
+        return placedBy === placedByNeedle;
       });
+
+      // Decide whether the active selection refers to "self" (no extra filtering)
+      // boolean check
+      const selectedIsSelf =
+        activeSelectionId.startsWith("me:") ||
+        (activeSelectionEmail.length > 0 && activeSelectionEmail === placedByNeedle) ||
+        (activeSelection.length > 0 && activeSelection === placedByNeedle);
+
+      // If the user selected a customer (not "self"), further filter by customer name (case-insensitive)
+      if (!selectedIsSelf && activeSelection) {
+        const needleName = activeSelection;
+        filtered = filtered.filter((o) => {
+          const cName = String(o.customerName ?? "").toLowerCase();
+          return cName.includes(needleName);
+        });
+      }
 
       setOrders(filtered);
     } catch (err: unknown) {
@@ -752,7 +614,8 @@ export default function OrdersPage(): JSX.Element {
     } finally {
       setIsLoading(false);
     }
-  }, [typedUser, currentUserId, currentUserEmail, primaryEmailAddress]);
+  }, [primaryEmailAddress, currentUser, currentUserId, currentUserEmail]);
+
 
   useEffect(() => {
     void fetchOrders();
@@ -844,7 +707,6 @@ export default function OrdersPage(): JSX.Element {
     [filteredBySearch]
   );
 
-  // All intentionally hides cancelled orders (same as Active). Admins see everything already in fetchOrders.
   const viewOrders = useMemo(() => {
     if (selectedTab === "all") return activeOrders;
     if (selectedTab === "active") return activeOrders;
@@ -900,7 +762,6 @@ export default function OrdersPage(): JSX.Element {
           <p className="text-sm text-gray-400 mt-1">Manage and view orders</p>
         </div>
 
-        {/* Only show Create button to admins */}
         {isAdmin && (
           <div className="flex items-center gap-3">
             <button
@@ -1127,7 +988,6 @@ export default function OrdersPage(): JSX.Element {
         )}
       </Modal>
 
-      {/* Only render create-order modal for admins */}
       {isAdmin && (
         <Modal
           isOpen={isCreateModalOpen}

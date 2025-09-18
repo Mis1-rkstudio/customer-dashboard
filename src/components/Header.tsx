@@ -33,9 +33,6 @@ export default function Header(): JSX.Element {
       String(typedUser.publicMetadata.role ?? "").toLowerCase() === "admin"
   );
 
-  // active internal user email from store (admin-only display)
-  const currentUserEmail = useUserStore((s) => s.currentUserEmail);
-
   const navLinks = [
     { href: "/", label: "Home" },
     { href: "/orders", label: "Orders" },
@@ -58,13 +55,6 @@ export default function Header(): JSX.Element {
           {/* admin-only: active email pill + user switcher */}
           {isAdmin && (
             <div className="hidden sm:flex items-center gap-4 whitespace-nowrap">
-              <div className="flex items-center text-sm text-slate-300">
-                <span className="mr-2 text-xs text-slate-400">Active:</span>
-                <span className="px-2 py-1 rounded bg-slate-800 text-slate-100">
-                  {currentUserEmail ?? "—"}
-                </span>
-              </div>
-
               {/* hide on small screens to avoid crowding */}
               <div className="hidden md:block">
                 <UserSwitcher />

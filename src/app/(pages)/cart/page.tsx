@@ -1,3 +1,4 @@
+// use client
 "use client";
 
 import React, { useState } from "react";
@@ -10,6 +11,7 @@ import {
   ShareOrderButton,
   OrderShape as ShareOrderShape,
 } from "@/components/ShareOrder";
+import { useUserStore } from "@/store/useUserStore";
 
 /* ---------------------------
    Types
@@ -59,22 +61,57 @@ function getGoogleDriveImageSrc(googleDriveUrl: string): string {
   return googleDriveUrl;
 }
 
-function getStringField(obj: unknown, key: string): string | undefined {
-  if (!isObject(obj)) return undefined;
-  const v = obj[key];
-  if (typeof v === "string" && v.trim()) return v.trim();
+/* Helpers that operate on item with safe fallbacks */
+
+/** Safely read a string-like field from the item or its raw payload */
+function getStringField(
+  item: CartItem | Record<string, unknown> | unknown,
+  key: string
+): string | undefined {
+  if (isObject(item) && typeof item[key] === "string" && item[key].trim())
+    return (item[key] as string).trim();
+
+  if (isObject(item) && isObject((item as Record<string, unknown>).raw)) {
+    const raw = (item as Record<string, unknown>).raw as Record<
+      string,
+      unknown
+    >;
+    const v = raw[key];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
   return undefined;
 }
 
-function getNumberField(obj: unknown, key: string): number {
-  if (!isObject(obj)) return 0;
-  return safeNumber(obj[key]);
+/** Safely read a numeric field (top-level or raw) */
+function getNumberField(
+  item: CartItem | Record<string, unknown> | unknown,
+  key: string
+): number {
+  if (isObject(item) && item[key] !== undefined) return safeNumber(item[key]);
+  if (isObject(item) && isObject((item as Record<string, unknown>).raw)) {
+    const raw = (item as Record<string, unknown>).raw as Record<
+      string,
+      unknown
+    >;
+    if (raw[key] !== undefined) return safeNumber(raw[key]);
+  }
+  return 0;
 }
 
-function getArrayField(obj: unknown, key: string): unknown[] | undefined {
-  if (!isObject(obj)) return undefined;
-  const v = obj[key];
-  return Array.isArray(v) ? v : undefined;
+/** Safely read an array field (top-level or raw) */
+function getArrayField(
+  item: CartItem | Record<string, unknown> | unknown,
+  key: string
+): unknown[] | undefined {
+  if (!isObject(item)) return undefined;
+  const v = item[key];
+  if (Array.isArray(v)) return v;
+  if (isObject((item as Record<string, unknown>).raw)) {
+    const raw = (item as Record<string, unknown>).raw as Record<string, unknown>;
+    const rv = raw[key];
+    if (Array.isArray(rv)) return rv;
+  }
+  return undefined;
 }
 
 /* ---------------------------
@@ -83,12 +120,12 @@ function getArrayField(obj: unknown, key: string): unknown[] | undefined {
 
 /** Safely get available colours from a cart item */
 function getAvailableColors(item: CartItem): string[] {
-  const topArr = getArrayField(item as unknown, "colors");
+  const topArr = getArrayField(item, "colors");
   if (topArr && topArr.length > 0) {
     return topArr.map((c) => String(c ?? "").trim()).filter(Boolean);
   }
-  if (isObject((item as unknown as Record<string, unknown>).raw)) {
-    const raw = (item as unknown as Record<string, unknown>).raw as Record<
+  if (isObject((item as Record<string, unknown>).raw)) {
+    const raw = (item as Record<string, unknown>).raw as Record<
       string,
       unknown
     >;
@@ -105,18 +142,18 @@ function getAvailableColors(item: CartItem): string[] {
 
 /** Safely get selected colors from cart item (legacy support) */
 function getSelectedColors(item: CartItem): string[] {
-  const topArr = getArrayField(item as unknown, "selectedColors");
-  if (topArr) return topArr.map((c) => String(c ?? "").trim()).filter(Boolean);
+  const topArr = getArrayField(item, "selectedColors");
+  if (topArr)
+    return topArr.map((c) => String(c ?? "").trim()).filter(Boolean);
 
-  if (isObject((item as unknown as Record<string, unknown>).raw)) {
-    const raw = (item as unknown as Record<string, unknown>).raw as Record<
+  if (isObject((item as Record<string, unknown>).raw)) {
+    const raw = (item as Record<string, unknown>).raw as Record<
       string,
       unknown
     >;
     const v = raw["selectedColor"] ?? raw["selected_colors"];
     if (typeof v === "string" && v.trim()) return [v.trim()];
-    if (Array.isArray(v))
-      return v.map((c) => String(c ?? "").trim()).filter(Boolean);
+    if (Array.isArray(v)) return v.map((c) => String(c ?? "").trim()).filter(Boolean);
   }
   return [];
 }
@@ -128,21 +165,19 @@ function getSelectedColors(item: CartItem): string[] {
 /** Get sizes map from cart item. Prefer explicit `sizes` field (object), else try `raw.Sizes` or `raw.sizes` arrays. */
 function getSizesMapFromItem(item: CartItem): Record<string, number> {
   // if item has a sizes object (from addToCart) use it
-  const asSizes = (item as unknown as Record<string, unknown>)["sizes"];
-  if (isObject(asSizes)) {
+  if (isObject(item) && isObject((item as Record<string, unknown>).sizes)) {
+    const asSizes = (item as Record<string, unknown>).sizes as Record<
+      string,
+      unknown
+    >;
     const out: Record<string, number> = {};
-    for (const [k, v] of Object.entries(asSizes as Record<string, unknown>)) {
-      out[String(k)] = safeNumber(v);
-    }
+    for (const [k, v] of Object.entries(asSizes)) out[String(k)] = safeNumber(v);
     return out;
   }
 
   // fallback to raw payload's Sizes array (if present) — initialize to 1 set each
-  if (isObject((item as unknown as Record<string, unknown>).raw)) {
-    const raw = (item as unknown as Record<string, unknown>).raw as Record<
-      string,
-      unknown
-    >;
+  if (isObject((item as Record<string, unknown>).raw)) {
+    const raw = (item as Record<string, unknown>).raw as Record<string, unknown>;
     const arr = (raw["Sizes"] ?? raw["sizes"]) as unknown;
     if (Array.isArray(arr) && arr.length > 0) {
       const out: Record<string, number> = {};
@@ -159,10 +194,25 @@ function getSizesMapFromItem(item: CartItem): Record<string, number> {
    --------------------------- */
 
 export default function CartPage(): React.ReactElement {
-  const { cartItems, removeFromCart, updateItem, getTotalSets, clearCart } =
-    useCart() as CartContextType;
+  // get context safely and provide typed no-op fallbacks
+  const cartCtx = useCart() as Partial<CartContextType> | undefined;
+  const cartItems = Array.isArray(cartCtx?.cartItems) ? cartCtx!.cartItems : [];
+
+  const noopRemove = (_id: string): void => {};
+  const noopUpdate = (_id: string, _payload?: UpdatePayload): void => {};
+
+  const removeFromCart = cartCtx?.removeFromCart ?? noopRemove;
+  const updateItem = cartCtx?.updateItem ?? noopUpdate;
+  const getTotalSets = cartCtx?.getTotalSets;
+  const clearCart = cartCtx?.clearCart;
+
   const { isLoaded, isSignedIn, user } = useUser();
   const router = useRouter();
+
+  // --- selection from switcher store (to enforce customer selection for admins) ---
+  const currentUserStore = useUserStore((s) => s.currentUser);
+  const currentUserId = useUserStore((s) => s.currentUserId);
+  const currentUserEmail = useUserStore((s) => s.currentUserEmail);
 
   const [masterQty, setMasterQty] = useState<number>(0);
   const [applying, setApplying] = useState<boolean>(false);
@@ -192,9 +242,7 @@ export default function CartPage(): React.ReactElement {
           return (
             s +
             safeNumber(
-              (it as unknown as Record<string, unknown>).set ??
-                (it as unknown as Record<string, unknown>).quantity ??
-                0
+              getNumberField(it, "set") || getNumberField(it, "quantity")
             )
           );
         }, 0)
@@ -204,16 +252,7 @@ export default function CartPage(): React.ReactElement {
 
   const inc = (it: CartItem): void => {
     // increment per-size if sizes exist, else increment sets
-    const selectedColors =
-      Array.isArray(
-        (it as unknown as Record<string, unknown>).selectedColors
-      ) &&
-      ((it as unknown as Record<string, unknown>).selectedColors as unknown[]).length >
-        0
-        ? ((it as unknown as Record<string, unknown>)
-            .selectedColors as string[])
-        : getSelectedColors(it);
-
+    const selectedColors = getSelectedColors(it);
     const colorsCount = Math.max(1, selectedColors.length || 1);
     const sizesMap = getSizesMapFromItem(it);
     const available =
@@ -225,7 +264,7 @@ export default function CartPage(): React.ReactElement {
         (a, b) => a + (safeNumber(b) || 0),
         0
       );
-      const sumAfter = sumCurrent + Object.keys(sizesMap).length; // because +1 per size adds number_of_sizes
+      const sumAfter = sumCurrent + Object.keys(sizesMap).length;
       const totalAfter = sumAfter * colorsCount;
       if (available && totalAfter > available) {
         alert(
@@ -236,18 +275,13 @@ export default function CartPage(): React.ReactElement {
       const newSizes: Record<string, number> = {};
       for (const k of Object.keys(sizesMap))
         newSizes[k] = (safeNumber(sizesMap[k]) || 0) + 1;
-      // we store `set` as per-size value (match ItemsPage semantics) — pick one size value as representative
       const representativePerSize = safeNumber(Object.values(newSizes)[0]);
       updateItem(it.id, { sizes: newSizes, set: representativePerSize });
       return;
     }
 
     // no sizes: operate on sets count
-    const cur = safeNumber(
-      (it as unknown as Record<string, unknown>).set ??
-        (it as unknown as Record<string, unknown>).quantity ??
-        0
-    );
+    const cur = safeNumber(getNumberField(it, "set") || getNumberField(it, "quantity"));
     const totalAfter = (cur + 1) * colorsCount;
     if (available && totalAfter > available) {
       alert(
@@ -269,24 +303,16 @@ export default function CartPage(): React.ReactElement {
       return;
     }
 
-    const cur = safeNumber(
-      (it as unknown as Record<string, unknown>).set ??
-        (it as unknown as Record<string, unknown>).quantity ??
-        0
-    );
+    const cur = safeNumber(getNumberField(it, "set") || getNumberField(it, "quantity"));
     updateItem(it.id, { set: Math.max(0, cur - 1) });
   };
 
   const onSetChange = (it: CartItem, v: number | string): void => {
-    const n = Math.max(0, Number(v) || 0); // n interpreted as per-size count when sizes exist
+    const n = Math.max(0, Number(v) || 0);
     const selectedColors =
-      Array.isArray(
-        (it as unknown as Record<string, unknown>).selectedColors
-      ) &&
-      ((it as unknown as Record<string, unknown>).selectedColors as unknown[]).length >
-        0
-        ? ((it as unknown as Record<string, unknown>)
-            .selectedColors as string[])
+      (Array.isArray(getArrayField(it, "selectedColors")) &&
+        (getArrayField(it, "selectedColors") as unknown[]).length > 0)
+        ? (getArrayField(it, "selectedColors") as unknown[]).map((c) => String(c ?? "").trim()).filter(Boolean)
         : getSelectedColors(it);
 
     const colorsCount = Math.max(1, selectedColors.length || 1);
@@ -295,7 +321,6 @@ export default function CartPage(): React.ReactElement {
 
     const sizesMap = getSizesMapFromItem(it);
     if (Object.keys(sizesMap).length > 0) {
-      // If sizes exist we treat `n` as per-size value: set each size to `n`, but check total
       const numSizes = Object.keys(sizesMap).length;
       const sumAfter = n * numSizes;
       const totalAfter = sumAfter * colorsCount;
@@ -310,7 +335,6 @@ export default function CartPage(): React.ReactElement {
         updateItem(it.id, { sizes: newSizes, set: allowedPerSize });
         return;
       }
-      // set each size to n
       const newSizes: Record<string, number> = {};
       for (const k of Object.keys(sizesMap)) newSizes[k] = n;
       updateItem(it.id, { sizes: newSizes, set: n });
@@ -339,13 +363,9 @@ export default function CartPage(): React.ReactElement {
     prev[sizeLabel] = parsed;
 
     const selectedColors =
-      Array.isArray(
-        (it as unknown as Record<string, unknown>).selectedColors
-      ) &&
-      ((it as unknown as Record<string, unknown>).selectedColors as unknown[]).length >
-        0
-        ? ((it as unknown as Record<string, unknown>)
-            .selectedColors as string[])
+      (Array.isArray(getArrayField(it, "selectedColors")) &&
+        (getArrayField(it, "selectedColors") as unknown[]).length > 0)
+        ? (getArrayField(it, "selectedColors") as unknown[]).map((c) => String(c ?? "").trim()).filter(Boolean)
         : getSelectedColors(it);
 
     const colorsCount = Math.max(1, selectedColors.length || 1);
@@ -384,28 +404,19 @@ export default function CartPage(): React.ReactElement {
   };
 
   const onColorToggle = (it: CartItem, color: string): void => {
-    const prev = Array.isArray(
-      (it as unknown as Record<string, unknown>).selectedColors
-    )
-      ? [
-          ...((it as unknown as Record<string, unknown>)
-            .selectedColors as string[]),
-        ]
+    const prevTop = Array.isArray(getArrayField(it, "selectedColors"))
+      ? (getArrayField(it, "selectedColors") as unknown[]).map((c) => String(c ?? "").trim()).filter(Boolean)
       : getSelectedColors(it);
 
-    const idx = prev.findIndex(
+    const idx = prevTop.findIndex(
       (c) => String(c).toLowerCase() === String(color).toLowerCase()
     );
-    if (idx >= 0) prev.splice(idx, 1);
-    else prev.push(color);
+    if (idx >= 0) prevTop.splice(idx, 1);
+    else prevTop.push(color);
 
     const sizesMap = getSizesMapFromItem(it);
-    const sets = safeNumber(
-      (it as unknown as Record<string, unknown>).set ??
-        (it as unknown as Record<string, unknown>).quantity ??
-        0
-    );
-    const colorsCount = Math.max(1, prev.length || 1);
+    const sets = safeNumber(getNumberField(it, "set") || getNumberField(it, "quantity"));
+    const colorsCount = Math.max(1, prevTop.length || 1);
     const available =
       getNumberField(it, "closingStock") + getNumberField(it, "productionQty");
 
@@ -425,22 +436,22 @@ export default function CartPage(): React.ReactElement {
         const newSizes: Record<string, number> = {};
         for (const k of sizeKeys) newSizes[k] = allowedPerSize;
         updateItem(it.id, {
-          selectedColors: prev,
+          selectedColors: prevTop,
           sizes: newSizes,
           set: allowedPerSize,
         });
         return;
       }
-      updateItem(it.id, { selectedColors: prev });
+      updateItem(it.id, { selectedColors: prevTop });
       return;
     }
 
     // no sizes
     if (available && sets * colorsCount > available) {
       const maxSets = Math.floor(available / colorsCount);
-      updateItem(it.id, { selectedColors: prev, set: Math.max(0, maxSets) });
+      updateItem(it.id, { selectedColors: prevTop, set: Math.max(0, maxSets) });
     } else {
-      updateItem(it.id, { selectedColors: prev });
+      updateItem(it.id, { selectedColors: prevTop });
     }
   };
 
@@ -451,15 +462,9 @@ export default function CartPage(): React.ReactElement {
     try {
       for (const it of cartItems) {
         const selectedColorsArr =
-          Array.isArray(
-            (it as unknown as Record<string, unknown>).selectedColors
-          ) &&
-          (
-            (it as unknown as Record<string, unknown>)
-              .selectedColors as unknown[]
-          ).length > 0
-            ? ((it as unknown as Record<string, unknown>)
-                .selectedColors as unknown[])
+          (Array.isArray(getArrayField(it, "selectedColors")) &&
+            (getArrayField(it, "selectedColors") as unknown[]).length > 0)
+            ? (getArrayField(it, "selectedColors") as unknown[]).map((c) => String(c ?? "").trim()).filter(Boolean)
             : getSelectedColors(it);
 
         const colorsCount = Math.max(1, selectedColorsArr.length || 1);
@@ -506,7 +511,11 @@ export default function CartPage(): React.ReactElement {
     setSelectAllColors(value);
     for (const it of cartItems) {
       const dedup = Array.from(
-        new Set(getAvailableColors(it).map((c) => String(c ?? "").trim()).filter(Boolean))
+        new Set(
+          getAvailableColors(it)
+            .map((c) => String(c ?? "").trim())
+            .filter(Boolean)
+        )
       );
       if (value) updateItem(it.id, { selectedColors: dedup });
       else updateItem(it.id, { selectedColors: [] });
@@ -540,7 +549,6 @@ export default function CartPage(): React.ReactElement {
       return { itemName, color, quantity: qty };
     });
 
-    // build customer object always as an object (ShareOrder expects no `null` customer)
     const customer = {
       name:
         (customerPayload &&
@@ -573,6 +581,71 @@ export default function CartPage(): React.ReactElement {
       return;
     }
 
+    // --- NEW: determine admin status of logged-in user ---
+    const typedUser = user as unknown as { publicMetadata?: Record<string, unknown> } | undefined;
+    const userRole = String(typedUser?.publicMetadata?.role ?? "").toLowerCase();
+    const isAdmin = userRole === "admin";
+
+    // --- NEW: validate switcher selection isn't "self" BUT only enforce for admins ---
+    const loggedInEmail =
+      (user?.emailAddresses && user.emailAddresses[0]?.emailAddress?.trim()) ??
+      (user?.primaryEmailAddress?.emailAddress ?? null) ??
+      null;
+
+    const loggedInLabel =
+      (user?.fullName as string | undefined) ??
+      (user?.firstName as string | undefined) ??
+      (user?.username as string | undefined) ??
+      (loggedInEmail as string | undefined) ??
+      "";
+
+    const loggedInLabelNormalized = String(loggedInLabel).trim().toLowerCase();
+    const loggedInEmailNormalized = String(loggedInEmail ?? "").trim().toLowerCase();
+
+    const activeSelection = String(currentUserStore ?? "").trim();
+    const activeSelectionNormalized = activeSelection.toLowerCase();
+
+    const activeSelectionId = String(currentUserId ?? "").trim();
+    const activeSelectionEmailNormalized = String(currentUserEmail ?? "").trim().toLowerCase();
+
+    const selectionIsSelf =
+      activeSelectionId.startsWith("me:") ||
+      (activeSelectionEmailNormalized && activeSelectionEmailNormalized === loggedInEmailNormalized) ||
+      (activeSelectionNormalized && activeSelectionNormalized === loggedInLabelNormalized);
+
+    // If user is admin -> require them to explicitly pick a customer (not self)
+    if (isAdmin) {
+      if (!activeSelection || selectionIsSelf) {
+        alert("Select a customer before placing order");
+        return;
+      }
+    } else {
+      // non-admin users: allow placing without selecting a customer (we'll default to logged-in user below)
+      // no-op
+    }
+
+    // --- NEW: validate each item has at least one color selected if item has available colors (always enforced) ---
+    for (const it of cartItems) {
+      const availableColors = getAvailableColors(it);
+      if (availableColors.length > 0) {
+        const selectedColors =
+          (Array.isArray(getArrayField(it, "selectedColors")) &&
+            (getArrayField(it, "selectedColors") as unknown[]).length > 0)
+            ? (getArrayField(it, "selectedColors") as unknown[]).map((c) => String(c ?? "").trim()).filter(Boolean)
+            : getSelectedColors(it);
+
+        if (!selectedColors || selectedColors.length === 0) {
+          const label =
+            getStringField(it as unknown, "name") ??
+            getStringField(it as unknown, "Item") ??
+            it.id ??
+            "this item";
+          alert(`Please select at least one colour for "${label}" before placing the order.`);
+          return;
+        }
+      }
+    }
+
     setPlacing(true);
     try {
       const itemsPayload: Record<string, unknown>[] = [];
@@ -580,21 +653,14 @@ export default function CartPage(): React.ReactElement {
       for (const it of cartItems) {
         // If sizes exist, we will expand per-color per-size (respecting selectedColors)
         const sizesMap = getSizesMapFromItem(it);
-        const qty = safeNumber(
-          (it as unknown as Record<string, unknown>).set ??
-            (it as unknown as Record<string, unknown>).quantity ??
-            0
-        );
-        const selectedColors = Array.isArray(
-          (it as unknown as Record<string, unknown>).selectedColors
-        )
-          ? ((it as unknown as Record<string, unknown>)
-              .selectedColors as string[])
+        const qty = safeNumber(getNumberField(it, "set") || getNumberField(it, "quantity"));
+        const selectedColors = Array.isArray(getArrayField(it, "selectedColors"))
+          ? (getArrayField(it, "selectedColors") as unknown[]).map((c) => String(c ?? "").trim()).filter(Boolean)
           : getSelectedColors(it);
 
         const base: Record<string, unknown> = {
           sku: it.id ?? undefined,
-          raw: (it as unknown as Record<string, unknown>).raw ?? null,
+          raw: isObject((it as Record<string, unknown>).raw) ? (it as Record<string, unknown>).raw : null,
           itemName:
             getStringField(it as unknown, "name") ??
             getStringField(it as unknown, "Item") ??
@@ -615,6 +681,7 @@ export default function CartPage(): React.ReactElement {
               }
             }
           } else {
+            // if no selected colors (but earlier validation ensures this should not happen for items with colors)
             for (const [sizeLabel, sizeQty] of Object.entries(sizesMap)) {
               itemsPayload.push({
                 ...base,
@@ -640,22 +707,26 @@ export default function CartPage(): React.ReactElement {
         }
       }
 
-      const emailAddr =
-        (user?.emailAddresses && user.emailAddresses[0]?.emailAddress) ?? null;
-      const userName =
-        (user?.fullName as string | undefined) ??
-        (user?.firstName as string | undefined) ??
-        (user?.username as string | undefined) ??
-        (emailAddr as string | undefined) ??
-        "Customer";
+      // Build customer payload:
+      // - If admin: we already required a selected customer -> use currentUserStore/currentUserEmail
+      // - If non-admin and no selection -> default to logged-in user's name/email
+      const useCustomerLabel =
+        activeSelection && !selectionIsSelf
+          ? activeSelection
+          : (String(loggedInLabel).trim() || "Customer");
+
+      const useCustomerEmail =
+        activeSelection && !selectionIsSelf
+          ? currentUserEmail ?? null
+          : (String(loggedInEmail ?? "").trim() || null);
 
       const customerPayload: Record<string, unknown> = {
-        label: userName,
-        email: (emailAddr as string) ?? null,
+        label: useCustomerLabel,
+        email: useCustomerEmail,
         phone: null,
       };
 
-      // build the final payload — include order_placed_by at top-level
+      // build the final payload — include order_placed_by at top-level (logged-in user's email)
       const payload: Record<string, unknown> = {
         customer: customerPayload,
         agent: null,
@@ -665,7 +736,7 @@ export default function CartPage(): React.ReactElement {
           createdBy: (user?.id as string | undefined) ?? null,
           confirmed: confirmedOrder,
         },
-        order_placed_by: emailAddr ?? null, // <<--- important: save only the email here
+        order_placed_by: loggedInEmail ?? null,
       };
 
       // If the customer toggled "Confirmed order" set orderStatus to 'Confirmed'
@@ -716,6 +787,8 @@ export default function CartPage(): React.ReactElement {
       if (typeof clearCart === "function") clearCart();
       else cartItems.forEach((it) => removeFromCart(it.id));
     } catch (err: unknown) {
+      // preserve previous error handling behavior
+      // eslint-disable-next-line no-console
       console.error("Failed to place order:", err);
       const message =
         isObject(err) &&
@@ -741,32 +814,6 @@ export default function CartPage(): React.ReactElement {
             {itemCount} items · {totalSets} total sets
           </p>
         </header>
-
-        {/* Confirmed order toggle (iPhone-style) */}
-        {/* Confirmed order checkbox */}
-        <div className="mb-6 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <label className="inline-flex items-center gap-3 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={confirmedOrder}
-                onChange={(e) => setConfirmedOrder(e.target.checked)}
-                aria-label="Confirmed order"
-                className="h-5 w-5 rounded border border-[#12303a] bg-[#07151a] text-blue-600 focus:ring-blue-400"
-              />
-              <span className="ml-2 text-sm text-slate-300 font-medium">
-                Confirmed order
-              </span>
-            </label>
-
-            <div className="text-sm text-slate-400">
-              Toggle when you&#39;ve reviewed and confirmed this order.
-            </div>
-          </div>
-
-          {/* keep the right-side controls area empty so layout matches */}
-          <div />
-        </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
           <div className="lg:col-span-2 space-y-6">
@@ -844,7 +891,7 @@ export default function CartPage(): React.ReactElement {
                 Your cart is empty.
               </div>
             ) : (
-              cartItems.map((item: CartItem) => {
+              cartItems.map((item) => {
                 const sizesMap = getSizesMapFromItem(item);
                 const numSizes = Object.keys(sizesMap).length;
                 const sumSizes = Object.values(sizesMap).reduce(
@@ -852,14 +899,8 @@ export default function CartPage(): React.ReactElement {
                   0
                 );
 
-                // Determine display for the main qty input:
-                // - if sizes exist and all sizes are equal -> show per-size value
-                // - else if sizes exist but not equal -> show sumSizes (fallback)
-                // - else show legacy set/quantity
                 const qtyFromSets = safeNumber(
-                  (item as unknown as Record<string, unknown>).set ??
-                    (item as unknown as Record<string, unknown>).quantity ??
-                    0
+                  getNumberField(item, "set") || getNumberField(item, "quantity")
                 );
 
                 let displayQty: number;
@@ -873,14 +914,10 @@ export default function CartPage(): React.ReactElement {
                   displayQty = qtyFromSets;
                 }
 
-                // total pieces uses sumSizes when sizes exist; else qty * colors
-                const selectedColors: string[] = Array.isArray(
-                  (item as unknown as Record<string, unknown>).selectedColors
-                )
-                  ? ((item as unknown as Record<string, unknown>)
-                      .selectedColors as string[])
+                const selectedColors = Array.isArray(getArrayField(item, "selectedColors"))
+                  ? (getArrayField(item, "selectedColors") as unknown[]).map((c) => String(c ?? "").trim()).filter(Boolean)
                   : getSelectedColors(item);
-                const colors: string[] = getAvailableColors(item);
+                const colors = getAvailableColors(item);
                 const available =
                   getNumberField(item, "closingStock") +
                   getNumberField(item, "productionQty");
@@ -894,8 +931,8 @@ export default function CartPage(): React.ReactElement {
                       );
 
                 const rawImage =
-                  getStringField(item as unknown, "image") ??
-                  getStringField(item as unknown, "image_url") ??
+                  getStringField(item, "image") ??
+                  getStringField(item, "image_url") ??
                   null;
                 const imageSrc =
                   rawImage && googleDriveImage(rawImage)
@@ -921,9 +958,7 @@ export default function CartPage(): React.ReactElement {
                       <div className="w-20 h-20 rounded-md overflow-hidden bg-[#0f1724] flex items-center justify-center">
                         <Image
                           src={imageSrc}
-                          alt={String(
-                            getStringField(item as unknown, "name") ?? ""
-                          )}
+                          alt={String(getStringField(item, "name") ?? "")}
                           width={160}
                           height={160}
                           className="object-cover w-full h-full"
@@ -932,25 +967,23 @@ export default function CartPage(): React.ReactElement {
 
                       <div>
                         <h2 className="text-lg font-semibold text-white">
-                          {getStringField(item as unknown, "name") ??
-                            item.id ??
-                            ""}
+                          {getStringField(item, "name") ?? item.id ?? ""}
                         </h2>
 
                         <div className="mt-2 text-sm text-slate-300 flex flex-wrap gap-4">
-                          {getStringField(item as unknown, "concept") && (
+                          {getStringField(item, "concept") && (
                             <span className="text-slate-300">
                               <span className="text-slate-400">Concept:</span>{" "}
                               <span className="font-medium text-white">
-                                {getStringField(item as unknown, "concept")}
+                                {getStringField(item, "concept")}
                               </span>
                             </span>
                           )}
-                          {getStringField(item as unknown, "fabric") && (
+                          {getStringField(item, "fabric") && (
                             <span className="text-slate-300">
                               <span className="text-slate-400">Fabric:</span>{" "}
                               <span className="font-medium text-white">
-                                {getStringField(item as unknown, "fabric")}
+                                {getStringField(item, "fabric")}
                               </span>
                             </span>
                           )}
@@ -986,7 +1019,6 @@ export default function CartPage(): React.ReactElement {
                           )}
                         </div>
 
-                        {/* sizes: show editable boxes when sizes exist */}
                         {numSizes > 0 && (
                           <div className="mt-4">
                             <div className="text-sm text-slate-300 mb-2">
@@ -994,10 +1026,7 @@ export default function CartPage(): React.ReactElement {
                             </div>
                             <div className="grid grid-cols-3 gap-2">
                               {Object.keys(sizesMap).map((sz) => (
-                                <div
-                                  key={sz}
-                                  className="flex items-center gap-2"
-                                >
+                                <div key={sz} className="flex items-center gap-2">
                                   <div className="text-sm text-gray-200 w-20">
                                     {sz}
                                   </div>
@@ -1006,11 +1035,7 @@ export default function CartPage(): React.ReactElement {
                                     pattern="[0-9]*"
                                     value={String(sizesMap[sz] ?? 0)}
                                     onChange={(e) =>
-                                      onSizeInputChange(
-                                        item,
-                                        sz,
-                                        e.target.value
-                                      )
+                                      onSizeInputChange(item, sz, e.target.value)
                                     }
                                     className="w-20 text-center bg-transparent text-white font-medium outline-none border border-[#12202a] rounded px-2 py-1"
                                   />
@@ -1040,9 +1065,7 @@ export default function CartPage(): React.ReactElement {
                               onSetChange(item, Number(e.target.value))
                             }
                             className="w-16 text-center bg-transparent text-white font-medium outline-none"
-                            aria-label={`Quantity for ${
-                              getStringField(item as unknown, "name") ?? item.id
-                            }`}
+                            aria-label={`Quantity for ${getStringField(item, "name") ?? item.id}`}
                           />
 
                           <button
@@ -1101,6 +1124,25 @@ export default function CartPage(): React.ReactElement {
                 <div className="flex justify-between text-slate-300">
                   <span>Total sets</span>
                   <span className="text-white font-medium">{totalSets}</span>
+                </div>
+              </div>
+
+              {/* --- Confirmed order toggle moved here --- */}
+              <div className="mt-4">
+                <label className="inline-flex items-center gap-3 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={confirmedOrder}
+                    onChange={(e) => setConfirmedOrder(e.target.checked)}
+                    aria-label="Confirmed order"
+                    className="h-5 w-5 rounded border border-[#12303a] bg-[#07151a] text-blue-600 focus:ring-blue-400"
+                  />
+                  <span className="ml-2 text-sm text-slate-300 font-medium">
+                    Confirmed order
+                  </span>
+                </label>
+                <div className="text-xs text-slate-400 mt-2">
+                  Toggle when you have reviewed and confirmed this order.
                 </div>
               </div>
 
@@ -1175,6 +1217,19 @@ export default function CartPage(): React.ReactElement {
                 phone={placedOrderForShare.customer?.phone ?? ""}
                 className="!bg-green-600 !hover:bg-green-700"
               />
+
+              {/* View Orders button (closes modal and navigates to /orders) */}
+              <button
+                type="button"
+                className="ml-2 px-4 py-2 rounded-md bg-blue-600 hover:bg-blue-700 text-white font-medium"
+                onClick={() => {
+                  setShowShareModal(false);
+                  setPlacedOrderForShare(null);
+                  router.push("/orders");
+                }}
+              >
+                View Orders
+              </button>
             </div>
 
             <div className="mt-3 text-xs text-slate-400">
