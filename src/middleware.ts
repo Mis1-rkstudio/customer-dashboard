@@ -1,71 +1,73 @@
 // middleware.ts
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
-import { NextResponse } from "next/server";
+import { NextResponse, NextRequest } from "next/server";
 
 /**
  * Route matchers
  */
-const isAdminRoute = createRouteMatcher(["/admin(.*)"]);            // pages under /admin
-const isAdminApi = createRouteMatcher(["/api/admin(.*)"]);         // admin-only API prefix (adjust as needed)
+const isAdminRoute = createRouteMatcher(["/admin(.*)"]); // pages under /admin
+const isAdminApi = createRouteMatcher(["/api/admin(.*)"]); // admin-only API prefix
 
 /**
- * API paths that should NOT be treated as admin-only (they are still protected: must be signed in)
- * Add any other API endpoints you want normal signed-in users to access here.
+ * Public API paths (no auth required)
  */
-const API_EXCEPTIONS = ["/api/item", "/api/internal_users"];
+const PUBLIC_API: string[] = ["/api/items"];
 
-export default clerkMiddleware(async (auth, req) => {
+/**
+ * API paths that require a signed-in user (but are NOT admin-only)
+ */
+const SIGNED_IN_ONLY_API: string[] = ["/api/internal_users"];
+
+export default clerkMiddleware(async (auth, req: NextRequest) => {
   const url = new URL(req.url);
   const pathname = url.pathname;
 
   // Resolve session once when needed
-  const session = await auth(); // returns null-like if no session
+  const session = await auth(); // Clerk provides a typed helper; no explicit `any` here
   const role = session?.sessionClaims?.metadata?.role ?? "";
   const isAdmin = String(role).toLowerCase() === "admin";
 
   // 1) Protect admin pages (server-side redirect non-admins)
   if (isAdminRoute(req)) {
     if (!isAdmin) {
-      // redirect non-admins to home
       return NextResponse.redirect(new URL("/", req.url));
     }
     // admin allowed
     return;
   }
 
-  // 2) API handling:
-  // - All API routes require signed-in user (auth.protect)
-  // - Admin-only API prefixes are further restricted to admin role, except those in API_EXCEPTIONS.
+  // 2) API handling
   if (pathname.startsWith("/api")) {
-    // If this API path is explicitly allowed for normal users, just require signed-in.
-    const isException = API_EXCEPTIONS.some(
+    // 2a) Public APIs: allow everybody (no auth)
+    const isPublic = PUBLIC_API.some((p) => pathname === p || pathname.startsWith(p + "/"));
+    if (isPublic) {
+      return; // no auth required
+    }
+
+    // 2b) Signed-in-only APIs: require user to be signed in
+    const isSignedInOnly = SIGNED_IN_ONLY_API.some(
       (p) => pathname === p || pathname.startsWith(p + "/")
     );
-
-    if (isException) {
-      // allow signed-in users (not admin-only)
-      await auth.protect(); // ensure user is signed in
+    if (isSignedInOnly) {
+      await auth.protect();
       return;
     }
 
-    // If this is an admin-only API prefix -> verify admin
+    // 2c) Admin-only API prefixes
     if (isAdminApi(req)) {
-      // require sign-in first (auth.protect will redirect to sign-in if not signed)
       await auth.protect();
       if (!isAdmin) {
-        // signed-in but not admin -> 403 JSON
         return NextResponse.json({ error: "Forbidden - admin only" }, { status: 403 });
       }
       return; // admin allowed
     }
 
-    // Default for other APIs: require signed-in (normal users can call these)
+    // 2d) Default for other APIs: require signed-in user
     await auth.protect();
     return;
   }
 
   // 3) All other page routes: do not restrict by role.
-  //    If you want to require sign-in for some pages, add additional matchers here.
   return;
 });
 
